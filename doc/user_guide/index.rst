@@ -13,5 +13,6 @@ It builds on top of `TensorLy <tensorly.org>`_ and enables anyone to use tensor 
    trl
    factorized_conv
    tensorized_linear
+   mpo_compression
    factorized_embeddings
    tensor_hooks
