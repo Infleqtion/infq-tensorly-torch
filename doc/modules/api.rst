@@ -74,7 +74,7 @@ Budget-driven matrix compression returns a ``BlockTT`` weight and diagnostics.
     :toctree: generated
     :template: function.rst
 
-    compress_matrix_to_mpo_budget
+    blocktt_MALS
 
 .. _complex_ref:
 

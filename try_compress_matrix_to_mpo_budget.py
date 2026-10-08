@@ -199,7 +199,7 @@ class SimpleMLP(nn.Module):
 
 
 if __name__ == "__main__":
-    from tltorch import compress_matrix_to_mpo_budget as compression
+    from tltorch import blocktt_MALS as compression
     from tltorch.utils import get_tensorized_shape
     from tltorch import BlockTT, TensorizedTensor
 

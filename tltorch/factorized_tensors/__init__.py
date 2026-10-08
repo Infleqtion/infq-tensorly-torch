@@ -7,4 +7,4 @@ from .complex_factorized_tensors import (ComplexCPTensor, ComplexTuckerTensor,
 from .complex_tensorized_matrices import (ComplexCPTensorized, ComplexBlockTT,
                                           ComplexDenseTensorized, ComplexTuckerTensorized)
 from .init import tensor_init, cp_init, tucker_init, tt_init, block_tt_init
-from .mpo_compression import compress_matrix_to_mpo_budget
+from .mpo_compression import blocktt_MALS

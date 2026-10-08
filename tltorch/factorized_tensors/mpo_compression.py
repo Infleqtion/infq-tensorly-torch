@@ -299,9 +299,6 @@ def _split_fixed_rank_pair(projected_pair, shared_rank, direction):
     if shared_rank > min(unfolding.shape):
         raise ValueError("Dimensional redundancy prevents a shape-preserving fixed-rank SVD split.")
     u, s, vh = torch.linalg.svd(unfolding, full_matrices=False)
-    # Preserve the range check on local discarded energy, even though it is
-    # not exposed as a global error bound or an exhaustive pair-update trace.
-    discarded_squared_norm = _squared_norm(_frobenius_norm(s[shared_rank:]))
     if direction == "left_to_right":
         first = u[:, :shared_rank]
         second = s[:shared_rank, None] * vh[:shared_rank]
@@ -313,7 +310,6 @@ def _split_fixed_rank_pair(projected_pair, shared_rank, direction):
     return (
         first.reshape(left, first_mode, shared_rank),
         second.reshape(shared_rank, second_mode, right),
-        discarded_squared_norm,
     )
 
 
@@ -334,7 +330,6 @@ def _refine_two_site(matrix, initial_cores, input_modes, output_modes,
     drift and local error increases are checked in absolute Frobenius norm,
     scaled by max(target norm, pre-update reconstruction norm, residual norm).
     This is a practical check for small dense problems, not a rigorous bound.
-    Local discarded energies are diagnostics, NOT an accumulated global bound.
     """
     cores = [core.detach().clone() for core in initial_cores]
     rank_profile = _rank_profile(cores)
@@ -383,7 +378,7 @@ def _refine_two_site(matrix, initial_cores, input_modes, output_modes,
                 projected_pair = _project_target_pair(
                     paired_target, pair_index, left_environment, right_environment
                 )
-                first, second, _ = _split_fixed_rank_pair(
+                first, second = _split_fixed_rank_pair(
                     projected_pair, rank_profile[pair_index + 1], direction
                 )
                 cores[pair_index], cores[pair_index + 1] = first, second
@@ -464,7 +459,7 @@ def _evaluate_growth(matrix, current_cores, paired_target, input_modes, output_m
     projected_pair = _project_target_pair(
         paired_target, pair_index, left_environment, right_environment
     )
-    first, second, _ = _split_fixed_rank_pair(
+    first, second = _split_fixed_rank_pair(
         projected_pair, ranks[pair_index + 1] + 1, "left_to_right"
     )
     cores[pair_index], cores[pair_index + 1] = first, second
@@ -548,7 +543,8 @@ def _choose_growth(matrix, current_cores, current_metrics, paired_target,
 
 @torch.no_grad()
 @_preserve_cpu_rng
-def compress_matrix_to_mpo_budget(
+@torch.autocast(device_type="cpu", enabled=False)
+def blocktt_MALS(
     matrix,
     input_modes,
     output_modes,
@@ -637,9 +633,11 @@ def compress_matrix_to_mpo_budget(
     checks scale this by target, reconstruction and residual norms.
 
     Input values and CPU RNG state are preserved, including on exceptions.
-    Core arithmetic keeps the input dtype; measurement operands are promoted
-    to float64 before subtraction and norms use scaling when needed. Exact
-    reconstruction means a measured zero residual, not a small-error cutoff.
+    CPU autocast is disabled throughout compression, restoring the caller's
+    autocast state on exit. Core arithmetic keeps the input dtype; measurement
+    operands are promoted to float64 before subtraction and norms use scaling
+    when needed. Exact reconstruction means a measured zero residual, not a
+    small-error cutoff.
     Search may stagnate despite better feasible approximations; it neither
     reallocates ranks nor proves infeasibility. Dense targets, explicit
     environments and intermediate dense reconstructions limit scalability.

@@ -1,7 +1,7 @@
 Budget-driven MPO matrix compression
 ====================================
 
-``tltorch.compress_matrix_to_mpo_budget`` approximates a dense matrix ``A``
+``tltorch.blocktt_MALS`` approximates a dense matrix ``A``
 with a :class:`~tltorch.BlockTT` matrix product operator (MPO). It reduces
 
 .. math::
@@ -41,7 +41,7 @@ CPU random stream.
    print("budget  stored  relative_error")
    for retained_percentage in (18.75, 37.5, 62.5, 87.5):
        budget = math.floor(retained_percentage / 100 * matrix.numel())
-       weight, info = tltorch.compress_matrix_to_mpo_budget(
+       weight, info = tltorch.blocktt_MALS(
            matrix, modes, modes, budget,
        )
        stored = sum(core.numel() for core in weight.factors)
@@ -151,8 +151,11 @@ Limits
 Inputs must be finite, nonempty, dense strided CPU float32/float64 matrices;
 noncontiguous inputs work. GPU, complex, integer, half-precision and sparse
 inputs are rejected. Modes, ranks and budgets require integers, excluding
-booleans. Core contractions, QR and SVD retain the input dtype. Measurements
-promote operands to float64 **before subtraction** and use robust scaled norms.
+booleans. CPU autocast is disabled throughout compression so core contractions,
+QR and SVD retain the input dtype; the caller's autocast state is restored on
+exit. Subsequent use of the returned ``BlockTT`` follows the caller's autocast
+context. Measurements promote operands to float64 **before subtraction** and
+use robust scaled norms.
 Nonfinite measured arithmetic or unrepresentable required norms, squared errors
 or scores raise ``FloatingPointError`` rather than reporting false zero or NaN.
 Even a representable norm can have an unrepresentable square. Rescale explicitly

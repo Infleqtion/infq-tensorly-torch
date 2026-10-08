@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from ... import BlockTT, FactorizedLinear, compress_matrix_to_mpo_budget
+from ... import BlockTT, FactorizedLinear, blocktt_MALS
 from .. import mpo_compression as mpo
 
 
@@ -18,7 +18,7 @@ def random_matrix(rows=16, columns=16, dtype=torch.float64, seed=42):
 
 
 def compress(matrix, budget, **kwargs):
-    return compress_matrix_to_mpo_budget(matrix, MODES, MODES, budget, **kwargs)
+    return blocktt_MALS(matrix, MODES, MODES, budget, **kwargs)
 
 
 @pytest.mark.parametrize('dtype,atol', [(torch.float64, 1e-12), (torch.float32, 2e-5)])
@@ -71,12 +71,14 @@ def test_two_core_refinement_equals_truncated_svd(direction):
     unfolding = matrix.reshape(3, 2, 2, 2).permute(0, 2, 1, 3).reshape(6, 4)
     u, s, vh = torch.linalg.svd(unfolding, full_matrices=False)
     reference = (u[:, :2] * s[:2]) @ vh[:2]
-    first, second, discarded = mpo._split_fixed_rank_pair(
+    first, second = mpo._split_fixed_rank_pair(
         unfolding.reshape(1, 6, 4, 1), 2, direction,
     )
-    torch.testing.assert_close(torch.einsum('apc,cqb->apqb', first, second).reshape(6, 4),
-                               reference, rtol=1e-12, atol=1e-12)
-    assert discarded == pytest.approx(s[2:].square().sum().item())
+    reconstructed = torch.einsum('apc,cqb->apqb', first, second).reshape(6, 4)
+    torch.testing.assert_close(reconstructed, reference, rtol=1e-12, atol=1e-12)
+    assert (unfolding - reconstructed).square().sum().item() == pytest.approx(
+        s[2:].square().sum().item(),
+    )
     # Starting from a different target detects merely merging/splitting cores
     # instead of projecting the original matrix.
     initial = mpo._initialize_cores(random_matrix(6, 4, seed=812), inputs, outputs, 2)
@@ -93,7 +95,7 @@ def test_two_core_budget_growth_matches_svd_optimum(rank):
     u, s, vh = torch.linalg.svd(unfolding, full_matrices=False)
     reference = ((u[:, :rank] * s[:rank]) @ vh[:rank])
     reference = reference.reshape(3, 2, 2, 2).permute(0, 2, 1, 3).reshape(6, 4)
-    weight, info = compress_matrix_to_mpo_budget(
+    weight, info = blocktt_MALS(
         matrix, (2, 2), (3, 2), 10 * rank, initial_ranks=1,
     )
     torch.testing.assert_close(weight.to_matrix(), reference, rtol=1e-12, atol=1e-12)
@@ -119,7 +121,7 @@ def test_storage_errors_histories_and_work_counts(budget, initial_ranks):
     weight, info = compress(matrix, budget, initial_ranks=initial_ranks,
                             max_sweeps_per_refinement=1, sweep_tolerance=0)
     assert isinstance(weight, BlockTT)
-    assert compress_matrix_to_mpo_budget is mpo.compress_matrix_to_mpo_budget
+    assert blocktt_MALS is mpo.blocktt_MALS
     ranks = (weight.factors[0].shape[0],) + tuple(c.shape[-1] for c in weight.factors)
     cost = sum(core.numel() for core in weight.factors)
     assert weight.rank == info['final_rank_profile'] == ranks
@@ -213,6 +215,29 @@ def test_independent_candidates_selection_and_single_initialization(monkeypatch)
         assert accepted['changed_bond'] == winner[1] + 1
 
 
+def test_competing_bonds_choose_improvement_per_added_parameter():
+    matrix = torch.zeros(6, 4, dtype=torch.float64)
+    matrix[0, 0], matrix[4, 0], matrix[2, 1] = 10, 2, math.sqrt(5)
+    # Initial storage is 9. Bond 1 captures squared energy 4 at cost 5;
+    # bond 2 captures energy 5 at cost 7. Bond 1 wins because 4/5 > 5/7.
+    weight, info = blocktt_MALS(
+        matrix, (1, 1, 4), (2, 3, 1), 16, initial_ranks=1,
+    )
+    reference = torch.zeros_like(matrix)
+    reference[0, 0], reference[4, 0] = 10, 2
+    reconstructed = weight.to_matrix().detach()
+    torch.testing.assert_close(reconstructed, reference, rtol=1e-12, atol=1e-12)
+    assert weight.rank == info['final_rank_profile'] == (1, 2, 1, 1)
+    assert sum(core.numel() for core in weight.factors) == info['final_mpo_parameters'] == 14
+    assert info['initial_mpo_parameters'] == 9
+    assert (matrix - reconstructed).square().sum().item() == pytest.approx(5, abs=1e-12)
+    assert info['final_squared_frobenius_error'] == pytest.approx(5, abs=1e-12)
+    assert info['number_of_candidate_evaluations'] == 2
+    assert info['number_of_accepted_growth_steps'] == 1
+    assert info['history'][-1]['changed_bond'] == 1
+    assert info['history'][-1]['score'] == pytest.approx(4 / (109 * 5), rel=1e-12)
+
+
 def test_candidate_tie_order():
     # Explicit contractual ties, independent of SVD roundoff in actual searches.
     candidates = [dict(score=1., relative_weight_error=.5, actual_mpo_parameters=20, bond=2)]
@@ -244,8 +269,8 @@ def test_refinement_keeps_initial_best_despite_allowed_roundoff(monkeypatch):
     split = mpo._split_fixed_rank_pair
 
     def slightly_worse(*args):
-        first, second, discarded = split(*args)
-        return first * (1 + 1e-14), second, discarded
+        first, second = split(*args)
+        return first * (1 + 1e-14), second
 
     monkeypatch.setattr(mpo, '_split_fixed_rank_pair', slightly_worse)
     refined, info = mpo._refine_two_site(matrix, initial, MODES, MODES, 2, 0)
@@ -263,8 +288,8 @@ def test_rectangular_noncontiguous_trainable_output_and_wrapper(dtype):
     original = matrix.detach().clone()
     inputs, outputs = (2, 2, 2), (3, 2, 2)
     kwargs = dict(initial_ranks=1, max_sweeps_per_refinement=1)
-    first, info = compress_matrix_to_mpo_budget(matrix, inputs, outputs, 40, **kwargs)
-    second, repeated = compress_matrix_to_mpo_budget(matrix, inputs, outputs, 40, **kwargs)
+    first, info = blocktt_MALS(matrix, inputs, outputs, 40, **kwargs)
+    second, repeated = blocktt_MALS(matrix, inputs, outputs, 40, **kwargs)
     assert first.rank == second.rank and info['termination_reason'] == repeated['termination_reason']
     torch.testing.assert_close(first.to_matrix(), second.to_matrix())
     torch.testing.assert_close(matrix, original, rtol=0, atol=0)
@@ -283,6 +308,23 @@ def test_rectangular_noncontiguous_trainable_output_and_wrapper(dtype):
     layer(batch).square().sum().backward()
     assert matrix.grad is None
     assert all(c.grad is not None and torch.isfinite(c.grad).all() for c in first.factors)
+
+
+@pytest.mark.parametrize('dtype,atol', [(torch.float32, 2e-5), (torch.float64, 1e-12)])
+def test_nonuniform_kronecker_target_preserves_physical_axis_order(dtype, atol):
+    factors = [
+        torch.tensor([[1, 2, -1], [3, -2, 4]], dtype=dtype),
+        torch.tensor([[2, -1], [.5, 3], [-2, 1]], dtype=dtype),
+        torch.tensor([[1, -2, .5, 3], [4, 1, -1, 2]], dtype=dtype),
+    ]
+    matrix = torch.kron(torch.kron(factors[0], factors[1]), factors[2])
+    weight, info = blocktt_MALS(
+        matrix, (3, 2, 4), (2, 3, 2), 20, initial_ranks=1,
+    )
+    torch.testing.assert_close(weight.to_matrix(), matrix, rtol=atol, atol=atol)
+    actual_ranks = (weight.factors[0].shape[0],) + tuple(core.shape[-1] for core in weight.factors)
+    assert actual_ranks == weight.rank == info['final_rank_profile'] == (1, 1, 1, 1)
+    assert sum(core.numel() for core in weight.factors) == info['final_mpo_parameters'] == 20
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
@@ -332,7 +374,7 @@ def test_growth_only_stagnation_does_not_prove_infeasibility():
 def test_roundoff_threshold_is_not_an_accuracy_target():
     paired = torch.diag(torch.tensor([1., 2e-6, 0., 0.], dtype=torch.float32))
     matrix = paired.reshape(2, 2, 2, 2).permute(0, 2, 1, 3).reshape(4, 4)
-    _, info = compress_matrix_to_mpo_budget(matrix, (2, 2), (2, 2), 16, initial_ranks=1)
+    _, info = blocktt_MALS(matrix, (2, 2), (2, 2), 16, initial_ranks=1)
     assert info['termination_reason'] == 'no_numerically_improving_candidate'
     assert info['final_relative_weight_error'] > 0
     assert info['number_of_candidate_evaluations'] == 1
@@ -353,10 +395,10 @@ def test_material_numerical_errors_are_not_silently_accepted(corruption, monkeyp
     else:
         split = mpo._split_fixed_rank_pair
         def corrupt(projected, rank, direction):
-            first, second, energy = split(projected, rank, direction)
+            first, second = split(projected, rank, direction)
             if corruption == 'refinement' or rank == 3:
                 first = first * 100
-            return first, second, energy
+            return first, second
         monkeypatch.setattr(mpo, '_split_fixed_rank_pair', corrupt)
         message = 'error increased'
     with pytest.raises(RuntimeError, match=message):
@@ -382,7 +424,7 @@ def test_material_numerical_errors_are_not_silently_accepted(corruption, monkeyp
 ])
 def test_invalid_controls_even_for_zero_matrix(kwargs, error):
     with pytest.raises(error):
-        compress_matrix_to_mpo_budget(torch.zeros(16, 16), MODES, MODES,
+        blocktt_MALS(torch.zeros(16, 16), MODES, MODES,
                                       **{'max_parameters': 48, **kwargs})
 
 
@@ -394,7 +436,7 @@ def test_invalid_controls_even_for_zero_matrix(kwargs, error):
 ])
 def test_invalid_tensorizations(inputs, outputs, error):
     with pytest.raises(error):
-        compress_matrix_to_mpo_budget(random_matrix(), inputs, outputs, 48)
+        blocktt_MALS(random_matrix(), inputs, outputs, 48)
 
 
 @pytest.mark.parametrize('matrix,error', [

@@ -29,7 +29,7 @@ def reference_norm(tensor):
 def test_budget_errors_match_independent_reference_across_scales(dtype, scale, budget):
     matrix = target_matrix(dtype, scale)
     original = matrix.clone()
-    weight, info = mpo.compress_matrix_to_mpo_budget(
+    weight, info = mpo.blocktt_MALS(
         matrix, MODES, MODES, budget, max_sweeps_per_refinement=2,
     )
     residual = matrix.double() - weight.to_matrix().detach().double()
@@ -72,14 +72,58 @@ def test_robust_norms_when_intermediate_squares_are_unrepresentable(scale):
 def test_unrepresentable_required_squared_diagnostics_raise(scale):
     before = torch.random.get_rng_state().clone()
     with pytest.raises(FloatingPointError, match='Squared norm.*representable float64'):
-        mpo.compress_matrix_to_mpo_budget(target_matrix(torch.float64, scale), MODES, MODES, 96)
+        mpo.blocktt_MALS(target_matrix(torch.float64, scale), MODES, MODES, 96)
     assert torch.equal(before, torch.random.get_rng_state())
 
 
-def test_discarded_local_energy_retains_its_range_check():
-    projected = torch.diag(torch.tensor([1., 1e-200], dtype=torch.float64)).reshape(1, 2, 2, 1)
-    with pytest.raises(FloatingPointError, match='Squared norm'):
-        mpo._split_fixed_rank_pair(projected, 1, 'left_to_right')
+def test_tiny_discarded_tail_with_representable_global_error():
+    matrix = torch.zeros(4, 2, dtype=torch.float64)
+    matrix[0, 0], matrix[3, 0], matrix[3, 1] = 10, 1e-200, 1
+    weight, info = mpo.blocktt_MALS(
+        matrix, (1, 1, 2), (2, 2, 1), 6, initial_ranks=1,
+    )
+    stored = sum(core.numel() for core in weight.factors)
+    assert stored == info['final_mpo_parameters'] == 6
+    residual = matrix.double() - weight.to_matrix().detach().double()
+    absolute_error = reference_norm(residual)
+    assert absolute_error == pytest.approx(1., rel=1e-14)
+    assert info['final_squared_frobenius_error'] == pytest.approx(
+        absolute_error * absolute_error, rel=3e-14, abs=0,
+    )
+    assert info['final_relative_weight_error'] == pytest.approx(
+        absolute_error / reference_norm(matrix), rel=2e-14,
+    )
+
+
+@pytest.mark.parametrize('max_sweeps', [1, None], ids=['one_sweep', 'default_sweeps'])
+def test_compression_preserves_precision_inside_cpu_autocast(max_sweeps):
+    matrix = torch.randn(6, 4, dtype=torch.float32,
+                         generator=torch.Generator().manual_seed(42))
+    # Two cores reduce to rank-2 SVD of this independently formed paired unfolding.
+    unfolding = matrix.reshape(3, 2, 2, 2).permute(0, 2, 1, 3).reshape(6, 4)
+    u, s, vh = torch.linalg.svd(unfolding, full_matrices=False)
+    reference = (u[:, :2] * s[:2]) @ vh[:2]
+    reference = reference.reshape(3, 2, 2, 2).permute(0, 2, 1, 3).reshape(6, 4)
+    options = {} if max_sweeps is None else {'max_sweeps_per_refinement': max_sweeps}
+    previous_autocast = torch.is_autocast_enabled('cpu')
+    with torch.autocast('cpu', dtype=torch.bfloat16):
+        weight, info = mpo.blocktt_MALS(
+            matrix, (2, 2), (3, 2), 20, initial_ranks=1, **options,
+        )
+        assert torch.is_autocast_enabled('cpu')
+        assert torch.get_autocast_dtype('cpu') == torch.bfloat16
+    assert torch.is_autocast_enabled('cpu') == previous_autocast
+    assert all(core.dtype == matrix.dtype for core in weight.factors)
+    reconstruction = weight.to_matrix().detach()
+    torch.testing.assert_close(reconstruction, reference, rtol=2e-5, atol=2e-6)
+    residual = matrix.double() - reconstruction.double()
+    absolute_error = reference_norm(residual)
+    assert info['final_squared_frobenius_error'] == pytest.approx(
+        absolute_error * absolute_error, rel=3e-14, abs=0,
+    )
+    assert info['final_relative_weight_error'] == pytest.approx(
+        absolute_error / reference_norm(matrix), rel=2e-14,
+    )
 
 
 def test_norm_ratio_and_score_range_checks():
@@ -112,7 +156,7 @@ def test_rng_state_future_draws_and_input_graph_are_preserved(seed):
         before = torch.random.get_rng_state().clone()
         control = torch.Generator().set_state(before)
         expected = torch.randn(20, generator=control)
-        weight, _ = mpo.compress_matrix_to_mpo_budget(
+        weight, _ = mpo.blocktt_MALS(
             matrix, MODES, MODES, 96, max_sweeps_per_refinement=1,
         )
         assert torch.equal(before, torch.random.get_rng_state())
@@ -136,7 +180,7 @@ def test_rng_and_input_restored_after_decomposition_failure(monkeypatch):
     monkeypatch.setattr(mpo, 'tensor_train_matrix', failing_decomposition)
     before = torch.random.get_rng_state().clone()
     with pytest.raises(RuntimeError, match='deliberate decomposition failure'):
-        mpo.compress_matrix_to_mpo_budget(matrix, MODES, MODES, 96)
+        mpo.blocktt_MALS(matrix, MODES, MODES, 96)
     assert torch.equal(before, torch.random.get_rng_state())
     assert torch.equal(matrix, original) and matrix.grad is None
 
@@ -145,9 +189,9 @@ def test_nonfinite_core_arithmetic_raises(monkeypatch):
     split = mpo._split_fixed_rank_pair
 
     def nonfinite_split(*args):
-        first, second, discarded = split(*args)
-        return first * math.inf, second, discarded
+        first, second = split(*args)
+        return first * math.inf, second
 
     monkeypatch.setattr(mpo, '_split_fixed_rank_pair', nonfinite_split)
     with pytest.raises(FloatingPointError, match='Nonfinite measurement'):
-        mpo.compress_matrix_to_mpo_budget(target_matrix(), MODES, MODES, 48)
+        mpo.blocktt_MALS(target_matrix(), MODES, MODES, 48)
