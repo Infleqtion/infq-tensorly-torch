@@ -66,6 +66,16 @@ You can also explicitly create the type of tensor you want using the following c
     CPTensorized
     BlockTT
 
+Budget-driven matrix compression returns a ``BlockTT`` weight and diagnostics.
+
+.. currentmodule:: tltorch
+
+.. autosummary::
+    :toctree: generated
+    :template: function.rst
+
+    blocktt_MALS
+
 .. _complex_ref:
 
 Complex Tensors
