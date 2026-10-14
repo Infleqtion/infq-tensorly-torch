@@ -315,6 +315,16 @@ def validate_block_tt_rank(tensorized_shape, rank):
     factor_shapes = [(s, )*ndim if isinstance(s, int) else s for s in tensorized_shape]
     factor_shapes = list(math.prod(e) for e in zip(*factor_shapes))
 
+    if ndim == 1 and (rank == 'same' or isinstance(rank, float)):
+        # A single core stores the full tensor; there is no internal bond to truncate.
+        if rank != 'same' and rank != 1.0:
+            raise ValueError(
+                "A single BlockTT core has no internal rank to adjust for a fractional target. "
+                "Use rank='same', rank=1.0, an integer or boundary ranks (1, 1), "
+                "or explicitly choose multiple tensorized mode pairs."
+            )
+        rank = (1, 1)
+
     return tl.tt_tensor.validate_tt_rank(factor_shapes, rank)
 
 
