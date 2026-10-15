@@ -8,6 +8,7 @@ from torch import nn
 from torch.nn.utils import parametrize
 
 from tltorch import FactorizedConv, FactorizedLinear
+from tltorch.utils import model_compression
 from tltorch.utils.model_compression import compress_model
 
 
@@ -59,6 +60,16 @@ def assert_independent_models(source, converted):
         for tensor in source_tensors:
             tensor.add_(2)
     assert_state_values(converted, converted_values)
+
+
+def rng_states():
+    return [torch.get_rng_state(), *torch.cuda.get_rng_state_all()]
+
+
+def assert_rng_states(expected):
+    actual = rng_states()
+    assert len(actual) == len(expected)
+    assert all(torch.equal(current, before) for current, before in zip(actual, expected))
 
 
 def forbid_decomposition(monkeypatch):
@@ -114,9 +125,9 @@ def test_nested_replacements_preserve_state_and_copy_independence(factorization,
     assert layers == original_settings
     expected_conv_rank = (2, 2, 3, 2) if factorization == "Tucker" else (1, 1, 1, 1, 1)
     assert report == {"replacements": [
-        {"name": "features.0", "factorization": factorization,
+        {"name": "features.0", "aliases": [], "factorization": factorization,
          "requested_rank": convolution["rank"], "actual_rank": expected_conv_rank},
-        {"name": "head", "factorization": "BlockTT", "requested_rank": 1, "actual_rank": (1, 1, 1)},
+        {"name": "head", "aliases": [], "factorization": "BlockTT", "requested_rank": 1, "actual_rank": (1, 1, 1)},
     ]}
     assert_independent_models(source, converted)
 
@@ -441,8 +452,10 @@ def test_later_decomposition_failure_keeps_source_and_original_cause(monkeypatch
     failure = RuntimeError("injected decomposition failure")
     original_conversion = FactorizedLinear.from_linear
     calls = []
+    random_state = rng_states()
 
     def convert_or_fail(layer, **options):
+        torch.rand(3)  # A failing decomposition may already have consumed randomness.
         calls.append(layer)
         if len(calls) == 2:
             with torch.no_grad():
@@ -451,12 +464,15 @@ def test_later_decomposition_failure_keeps_source_and_original_cause(monkeypatch
         return original_conversion(layer, **options)
 
     monkeypatch.setattr(FactorizedLinear, "from_linear", convert_or_fail)
+    result = None
     with pytest.raises(RuntimeError, match="untouched.*injected decomposition failure") as error:
-        compress_model(source, {
+        result = compress_model(source, {
             "head": {"factorization": "BlockTT", "rank": 1},
             "untouched": {"factorization": "BlockTT", "rank": 1},
         })
+    assert result is None
     assert error.value.__cause__ is failure
+    assert_rng_states(random_state)
     assert len(calls) == 2
     assert calls[0] is not source.head and calls[1] is not source.untouched
     assert_state_values(source, before)
@@ -472,3 +488,297 @@ def test_cuda_model_copy_and_replacement():
     assert isinstance(converted[0], FactorizedLinear)
     assert all(p.device == source[0].weight.device and p.dtype == torch.float32 for p in converted.parameters())
     assert_independent_models(source, converted)
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["shared-layer", "shared-container"])
+@pytest.mark.parametrize("select_both", [False, True], ids=["one-alias", "both-aliases"])
+def test_shared_layer_is_converted_once_and_all_aliases_are_replaced(nested, select_both, monkeypatch):
+    torch.manual_seed(23)
+    source = nn.Module()
+    shared = nn.Linear(8, 8).eval()
+    source.left = source.right = nn.Sequential(shared) if nested else shared
+    left, right = ("left.0", "right.0") if nested else ("left", "right")
+    before = state_values(source)
+    original_conversion = FactorizedLinear.from_linear
+    calls = []
+
+    def record_conversion(layer, **options):
+        calls.append(layer)
+        return original_conversion(layer, **options)
+
+    monkeypatch.setattr(FactorizedLinear, "from_linear", record_conversion)
+    # List/tuple spelling and explicit/default modes express the same request.
+    layers = {right: {"factorization": "blocktt", "rank": [1, 1, 1, 1],
+                      "in_tensorized_features": [2, 2, 2], "out_tensorized_features": [2, 2, 2]}}
+    if select_both:
+        layers[left] = {"factorization": "BlockTT", "rank": (1, 1, 1, 1)}
+    settings = deepcopy(layers)
+    converted, report = compress_model(source, layers)
+    replacement = converted.get_submodule(right)
+    assert isinstance(replacement, FactorizedLinear)
+    assert converted.get_submodule(left) is replacement
+    if nested:
+        assert converted.left is converted.right
+    assert source.get_submodule(left) is source.get_submodule(right) is shared
+    assert len(calls) == 1 and calls[0] is not shared
+    assert not replacement.training
+    assert_state_values(source, before)
+    assert layers == settings
+    assert report == {"replacements": [{
+        "name": right, "aliases": [left], "factorization": "BlockTT",
+        "requested_rank": [1, 1, 1, 1], "actual_rank": tuple(replacement.rank),
+    }]}
+    assert_independent_models(source, converted)
+
+
+@pytest.mark.parametrize("other_rank", [2, 1.0], ids=["different-rank", "integer-versus-fraction"])
+def test_conflicting_alias_settings_prevent_all_conversion(other_rank, monkeypatch):
+    source = nn.ModuleDict({"first": nn.Linear(8, 8), "left": nn.Linear(8, 8)})
+    source.right = source.left
+    before = state_values(source)
+    calls = forbid_decomposition(monkeypatch)
+    with pytest.raises(ValueError, match="left.*right.*conflicting settings"):
+        compress_model(source, {
+            "first": {"factorization": "BlockTT", "rank": 1},
+            "left": {"factorization": "BlockTT", "rank": 1},
+            "right": {"factorization": "BlockTT", "rank": other_rank},
+        })
+    assert calls == []
+    assert source.left is source.right
+    assert_state_values(source, before)
+
+
+@pytest.mark.parametrize("parameter_name", ["weight", "bias"])
+@pytest.mark.parametrize("owner", ["selected-layer", "unselected-layer", "container"])
+def test_parameter_ties_to_other_modules_are_rejected(parameter_name, owner, monkeypatch):
+    source = nn.ModuleDict({"selected": nn.Linear(4, 4), "other": nn.Linear(4, 4)})
+    parameter = getattr(source.selected, parameter_name)
+    layers = {"selected": {"factorization": "BlockTT", "rank": 1}}
+    if owner == "container":
+        source.register_parameter("saved_parameter", parameter)
+        other_name = "saved_parameter"
+    else:
+        setattr(source.other, parameter_name, parameter)
+        other_name = "other." + parameter_name
+        if owner == "selected-layer":
+            layers["other"] = {"factorization": "BlockTT", "rank": 1}
+    before = state_values(source)
+    calls = forbid_decomposition(monkeypatch)
+    with pytest.raises(ValueError, match=f"selected.*{parameter_name}.*{other_name}.*tied parameters"):
+        compress_model(source, layers)
+    assert calls == []
+    assert getattr(source.selected, parameter_name) is parameter
+    assert_state_values(source, before)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable"))])
+@pytest.mark.parametrize("empty", [False, True], ids=["selected", "empty-selection"])
+@pytest.mark.parametrize("fail", [False, True], ids=["copy-success", "copy-failure"])
+def test_copying_and_conversion_preserve_rng_even_for_empty_selection(device, empty, fail, monkeypatch):
+    torch.manual_seed(24)
+    source = nn.Sequential(nn.Linear(4, 6, device=device))
+    before = state_values(source)
+    original_copy = model_compression.deepcopy
+    failure = RuntimeError("injected copying failure")
+
+    def copy_with_randomness(value):
+        if isinstance(value, nn.Module):
+            # Model copying may call custom code that draws random numbers.
+            torch.rand(3)
+            torch.rand(3, device=device)
+            if fail:
+                raise failure
+        return original_copy(value)
+
+    monkeypatch.setattr(model_compression, "deepcopy", copy_with_randomness)
+    layers = {} if empty else {"0": {"factorization": "BlockTT", "rank": 1}}
+    random_state = rng_states()
+    if fail:
+        with pytest.raises(RuntimeError, match="Model copy failed.*injected copying failure") as error:
+            compress_model(source, layers)
+        assert error.value.__cause__ is failure
+    else:
+        converted, report = compress_model(source, layers)
+        assert converted is not source
+        assert len(report["replacements"]) == (0 if empty else 1)
+        if empty:
+            assert_state_values(converted, before)
+    assert_rng_states(random_state)
+    assert_state_values(source, before)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable"))])
+@pytest.mark.parametrize("factorization", ["BlockTT", "Tucker", "TT"])
+@pytest.mark.parametrize("fail", [False, True], ids=["success", "conversion-failure"])
+def test_autocast_is_disabled_for_conversion_and_restored(device, factorization, fail, monkeypatch):
+    torch.manual_seed(25)
+    if factorization == "BlockTT":
+        source = nn.Linear(4, 6, device=device, dtype=torch.float32)
+        converter, method = FactorizedLinear, "from_linear"
+        rank = 1
+    else:
+        source = nn.Conv2d(3, 4, (3, 2), device=device, dtype=torch.float32)
+        converter, method = FactorizedConv, "from_conv"
+        rank = (1, 1, 1, 1) if factorization == "Tucker" else 1
+    original_conversion = getattr(converter, method)
+    before = state_values(source)
+    failure = RuntimeError("injected conversion failure")
+
+    def check_precision_and_convert(layer, **options):
+        assert not torch.is_autocast_enabled(device)
+        torch.rand(3)
+        torch.rand(3, device=device)
+        replacement = original_conversion(layer, **options)
+        if fail:
+            raise failure
+        return replacement
+
+    monkeypatch.setattr(converter, method, check_precision_and_convert)
+    outer_state = (torch.is_autocast_enabled(device), torch.get_autocast_dtype(device),
+                   torch.is_autocast_cache_enabled())
+    random_state = rng_states()
+    amp_dtype = torch.bfloat16 if device == "cpu" else torch.float16
+    with torch.autocast(device, dtype=amp_dtype, cache_enabled=False):
+        settings = {"": {"factorization": factorization, "rank": rank}}
+        if fail:
+            with pytest.raises(RuntimeError, match="Layer ''.*injected conversion failure") as error:
+                compress_model(source, settings)
+            assert error.value.__cause__ is failure
+        else:
+            converted, _ = compress_model(source, settings)
+            assert all(p.dtype == torch.float32 and p.device == source.weight.device
+                       for p in converted.parameters())
+        assert torch.is_autocast_enabled(device)
+        assert torch.get_autocast_dtype(device) == amp_dtype
+        assert not torch.is_autocast_cache_enabled()
+    assert (torch.is_autocast_enabled(device), torch.get_autocast_dtype(device),
+            torch.is_autocast_cache_enabled()) == outer_state
+    assert_rng_states(random_state)
+    assert_state_values(source, before)
+
+
+@pytest.mark.parametrize("parameter_name", ["weight", "bias"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_source_prevents_all_conversion(parameter_name, value, monkeypatch):
+    source = SmallModel()
+    with torch.no_grad():
+        getattr(source.head, parameter_name).flatten()[0] = value
+    before = state_values(source)
+    calls = forbid_decomposition(monkeypatch)
+    random_state = rng_states()
+    with pytest.raises(ValueError, match=f"head.*{parameter_name}.*NaN or infinity"):
+        compress_model(source, {
+            "untouched": {"factorization": "BlockTT", "rank": 1},
+            "head": {"factorization": "BlockTT", "rank": 1},
+        })
+    assert calls == []
+    assert_rng_states(random_state)
+    for name, tensor in source.state_dict().items():
+        torch.testing.assert_close(tensor, before[name], rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize("factorization", ["BlockTT", "Tucker", "TT"])
+@pytest.mark.parametrize("invalid", ["factor", "bias", "overflow"])
+def test_nonfinite_replacement_is_rejected_without_changing_source(factorization, invalid, monkeypatch):
+    torch.manual_seed(26)
+    if factorization == "BlockTT":
+        source = nn.Linear(4, 6)
+        converter, method = FactorizedLinear, "from_linear"
+        rank = 1
+    else:
+        source = nn.Conv2d(3, 4, (3, 2))
+        converter, method = FactorizedConv, "from_conv"
+        rank = (1, 1, 1, 1) if factorization == "Tucker" else 1
+    original_conversion = getattr(converter, method)
+    before = state_values(source)
+
+    def invalid_conversion(layer, **options):
+        replacement = original_conversion(layer, **options)
+        with torch.no_grad():
+            if invalid == "factor":
+                next(replacement.weight.parameters()).fill_(float("nan"))
+            elif invalid == "bias":
+                replacement.bias.fill_(float("inf"))
+            else:
+                # Every stored value is finite, but multiplying the factors overflows float32.
+                for parameter in replacement.weight.parameters():
+                    parameter.fill_(1e20)
+                assert all(torch.isfinite(p).all() for p in replacement.parameters())
+                dense = (replacement.weight.to_matrix() if factorization == "BlockTT"
+                         else replacement.weight.to_tensor())
+                assert not torch.isfinite(dense).all()
+        return replacement
+
+    monkeypatch.setattr(converter, method, invalid_conversion)
+    message = "reconstructed weight" if invalid == "overflow" else "replacement parameter"
+    random_state = rng_states()
+    with pytest.raises(RuntimeError, match=f"Layer ''.*{message}.*NaN or infinity") as error:
+        compress_model(source, {"": {"factorization": factorization, "rank": rank}})
+    assert isinstance(error.value.__cause__, ValueError)
+    assert_rng_states(random_state)
+    assert_state_values(source, before)
+
+
+@pytest.mark.parametrize("check,error_type", [
+    ("source weight", ValueError), ("reconstructed weight", RuntimeError),
+])
+def test_numerical_check_exception_keeps_layer_context_and_caller_state(check, error_type, monkeypatch):
+    torch.manual_seed(27)
+    source = nn.Linear(4, 6)
+    before = state_values(source)
+    original_check = model_compression._require_finite
+    failure = RuntimeError("injected numerical check failure")
+
+    def fail_during_check(tensor, description):
+        if description == check:
+            torch.rand(3)
+            raise failure
+        return original_check(tensor, description)
+
+    monkeypatch.setattr(model_compression, "_require_finite", fail_during_check)
+    random_state = rng_states()
+    with pytest.raises(error_type, match="Layer ''.*injected numerical check failure") as error:
+        compress_model(source, {"": {"factorization": "BlockTT", "rank": 1}})
+    assert error.value.__cause__ is failure
+    assert_rng_states(random_state)
+    assert_state_values(source, before)
+
+
+def test_alias_installation_failure_preserves_source_rng_and_original_cause():
+    torch.manual_seed(28)
+    failure = TypeError("container rejects factorized replacement")
+    attempts = []
+
+    class RejectingContainer(nn.Module):
+        def __init__(self, child):
+            super().__init__()
+            self.child = child
+
+        def __setattr__(self, name, value):
+            if name == "child" and isinstance(value, FactorizedLinear):
+                torch.rand(3)  # Custom installation code may consume randomness before failing.
+                attempts.append(self)
+                raise failure
+            super().__setattr__(name, value)
+
+    source = nn.Module()
+    shared = nn.Linear(4, 6).eval()
+    source.selected = shared
+    source.container = RejectingContainer(shared)
+    before = state_values(source)
+    modes = {name: module.training for name, module in source.named_modules()}
+    random_state = rng_states()
+    result = None
+
+    # The selected path is installed first; its alias in the custom container then fails.
+    with pytest.raises(RuntimeError, match=r"Layer 'selected'.*alias 'container\.child'.*rejects") as error:
+        result = compress_model(source, {"selected": {"factorization": "BlockTT", "rank": 1}})
+    assert result is None
+    assert error.value.__cause__ is failure
+    assert len(attempts) == 1 and attempts[0] is not source.container
+    assert source.selected is source.container.child is shared
+    assert_state_values(source, before)
+    assert {name: module.training for name, module in source.named_modules()} == modes
+    assert_rng_states(random_state)

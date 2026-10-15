@@ -1,8 +1,6 @@
 """Select and convert ordinary layers in an independent model copy.
 
-This module implements the first part of the model-compression contract. Shared
-modules and tied parameters, RNG/autocast preservation, numerical safeguards,
-storage/error measurements, and parameter caps remain separate work.
+Storage/error measurements and parameter caps remain separate work.
 """
 
 from collections.abc import Mapping
@@ -17,7 +15,9 @@ from torch.nn.parameter import is_lazy
 from torch.nn.utils.parametrize import is_parametrized
 
 from ..factorized_layers import FactorizedConv, FactorizedLinear
-from ..factorized_layers.factorized_convolution import kernel_shape_to_factorization_shape
+from ..factorized_layers.factorized_convolution import (
+    kernel_shape_to_factorization_shape, tensor_to_kernel,
+)
 from ..factorized_tensors.tensorized_matrices import validate_block_tt_rank
 from .tensorize_shape import get_tensorized_shape
 
@@ -47,6 +47,11 @@ def _normalize_modes(modes, size, option):
     if product != size:
         raise ValueError(f"{option} must have product {size}, got {product}")
     return tuple(int(m) for m in modes)
+
+
+def _require_finite(tensor, description):
+    if not torch.isfinite(tensor).all():
+        raise ValueError(f"{description} contains NaN or infinity")
 
 
 def _validate_layer(layer):
@@ -95,6 +100,7 @@ def _validate_layer(layer):
             raise ValueError(f"{name} must use float32 or float64, got {tensor.dtype}")
         if getattr(tensor, "_backward_hooks", None) or getattr(tensor, "_post_accumulate_grad_hooks", None):
             raise ValueError(f"selected {name} has hooks, which are not supported")
+        _require_finite(tensor, f"source {name}")
 
     if layer.bias is not None:
         if layer.bias.device != layer.weight.device or layer.bias.dtype != layer.weight.dtype:
@@ -152,12 +158,13 @@ def _prepare_conversion_options(layer, settings):
                                             "out_tensorized_features")
             if len(input_modes) != len(output_modes):
                 raise ValueError("input and output tensorized features must have the same number of modes")
-            options.update(auto_tensorize=False, in_tensorized_features=input_modes,
-                           out_tensorized_features=output_modes)
         else:
             # Match from_linear's automatic tensorization without allocating factors.
             input_modes, output_modes = get_tensorized_shape(
                 layer.in_features, layer.out_features, order=3, min_dim=2, verbose=False)
+        # Resolve defaults so explicit and automatic choices compare by their actual modes.
+        options.update(auto_tensorize=False, in_tensorized_features=tuple(input_modes),
+                       out_tensorized_features=tuple(output_modes))
         validate_block_tt_rank((output_modes, input_modes), rank)
     elif factorization == "Tucker":
         if isinstance(rank, tuple) and len(rank) != 4:
@@ -179,6 +186,95 @@ def _prepare_conversion_options(layer, settings):
     return options
 
 
+def _collect_requests(model, layers):
+    # Keep every registered path, including descendants of shared containers.
+    modules = dict(model.named_modules(remove_duplicate=False))
+    aliases = {}
+    tensor_owners = {}
+    for name, module in modules.items():
+        aliases.setdefault(id(module), []).append(name)
+        for registrations in (module._parameters, module._buffers):
+            for tensor_name, tensor in registrations.items():
+                if tensor is not None:
+                    path = f"{name}.{tensor_name}" if name else tensor_name
+                    tensor_owners.setdefault(id(tensor), []).append((module, path))
+
+    requests = {}
+    for name, settings in layers.items():
+        if not isinstance(name, str) or name not in modules:
+            raise ValueError(f"Layer {name!r}: no registered module has this exact name")
+        layer = modules[name]
+        try:
+            options = _prepare_conversion_options(layer, settings)
+            for parameter_name in ("weight", "bias"):
+                parameter = getattr(layer, parameter_name)
+                for owner, path in tensor_owners.get(id(parameter), []):
+                    if owner is not layer:
+                        raise ValueError(f"{parameter_name} is also registered as {path!r} "
+                                         "on a different module; tied parameters are not supported")
+        except (TypeError, ValueError, OverflowError, RuntimeError) as error:
+            raise ValueError(f"Layer {name!r}: {error}") from error
+
+        previous = requests.get(id(layer))
+        if previous is not None:
+            # Python equates 1 and 1.0; rank treats them as a size and a storage target.
+            same_rank_kind = type(options["rank"]) is type(previous["options"]["rank"])
+            if options != previous["options"] or not same_rank_kind:
+                raise ValueError(f"Layers {previous['name']!r} and {name!r}: "
+                                 "conflicting settings for the same shared layer")
+            continue
+        requests[id(layer)] = {
+            "name": name,
+            "aliases": [alias for alias in aliases[id(layer)] if alias != name],
+            "options": options,
+            "requested_rank": deepcopy(settings["rank"]),
+        }
+    return list(requests.values())
+
+
+@torch.no_grad()
+def _validate_replacement(replacement, factorization):
+    for name, parameter in replacement.named_parameters():
+        _require_finite(parameter, f"replacement parameter {name!r}")
+    # Finite factors can overflow when multiplied. Keep this dense weight temporary.
+    if isinstance(replacement, FactorizedLinear):
+        weight = replacement.weight.to_matrix()
+    else:
+        # TT puts output channels last; use the existing kernel-layout conversion.
+        weight = tensor_to_kernel(factorization, replacement.weight.to_tensor())
+    _require_finite(weight, "reconstructed weight")
+
+
+def _convert_selected_layer(model, name, options, implementation):
+    """Convert a layer in the copied model, preserving precision and error context."""
+    try:
+        layer = model.get_submodule(name)
+        with torch.autocast(device_type=layer.weight.device.type, enabled=False):
+            if type(layer) is nn.Linear:
+                replacement = FactorizedLinear.from_linear(layer, implementation=implementation, **options)
+            else:
+                replacement = FactorizedConv.from_conv(layer, implementation=implementation, **options)
+            _validate_replacement(replacement, options["factorization"])
+    except Exception as error:
+        raise RuntimeError(f"Layer {name!r}: {options['factorization']} conversion failed: {error}") from error
+    return replacement
+
+
+def _install_replacement(model, name, aliases, replacement):
+    """Replace all registered names, returning the new root when needed."""
+    for alias in [name, *aliases]:
+        try:
+            if alias:
+                parent_name, _, child_name = alias.rpartition(".")
+                setattr(model.get_submodule(parent_name), child_name, replacement)
+            else:
+                model = replacement
+        except Exception as error:
+            raise RuntimeError(f"Layer {name!r}: installing replacement at alias {alias!r} failed: "
+                               f"{error}") from error
+    return model
+
+
 def compress_model(model, layers, *, implementation="factorized"):
     """Replace named layers in an independent deep copy of ``model``.
 
@@ -192,14 +288,25 @@ def compress_model(model, layers, *, implementation="factorized"):
     in this version. This restriction does not apply to unselected layers or model
     containers.
 
-    Return ``(compressed_model, {"replacements": [...]})``. Each replacement records
-    its name, factorization, requested rank, and actual rank. No storage or error
-    measurements are included yet. All requests are validated before copying or
-    decomposing, and only the copy is modified. No forward passes are performed.
+    Shared layers are converted once and replaced at every registered path.
+    Selected aliases must have compatible settings. Weight or bias tensors tied
+    to a different module are rejected; overlapping storage in distinct tensors
+    is outside the supported scope.
 
-    This incremental API is not exported at package level. Use models without
-    shared-module aliases or tied parameters for now; handling those cases, RNG
-    and autocast preservation, and complete numerical safeguards is deferred.
+    Return ``(compressed_model, {"replacements": [...]})``. Each replacement records
+    the first selected name, its other registered names in ``aliases``, the
+    factorization, requested rank, and actual rank. All requests are validated
+    before copying or decomposing. Only the copy is modified; no forward passes
+    or model-wide training-mode changes are performed.
+
+    Copying and conversion preserve the caller's PyTorch CPU and CUDA RNG states,
+    including on failure. Conversion and reconstruction run with autocast disabled
+    for the layer's device, restoring the caller's context afterward. Source
+    weights/biases, replacement parameters, and reconstructed weights must be
+    finite. Failures raise an error instead of returning a partial model.
+
+    Storage/error measurements, parameter caps, and the top-level public export
+    remain deferred.
     """
     if not isinstance(model, nn.Module):
         raise TypeError("model must be an nn.Module")
@@ -208,37 +315,25 @@ def compress_model(model, layers, *, implementation="factorized"):
     if not isinstance(implementation, str) or implementation not in ("factorized", "reconstructed"):
         raise ValueError("implementation must be 'factorized' or 'reconstructed'")
 
-    modules = dict(model.named_modules()) #build dict connecting each layer's name to its layer object
-    requests = []
-    for name, settings in layers.items():
-        if not isinstance(name, str) or name not in modules:
-            raise ValueError(f"Layer {name!r}: no registered module has this exact name")
+    # Copying may run custom code that draws on any visible CUDA generator.
+    # fork_rng also protects CPU state and works with an empty CUDA device list.
+    with torch.random.fork_rng(devices=range(torch.cuda.device_count())):
+        requests = _collect_requests(model, layers)
         try:
-            options = _prepare_conversion_options(modules[name], settings)
-        except (TypeError, ValueError, OverflowError) as error:
-            raise ValueError(f"Layer {name!r}: {error}") from error
-        requests.append((name, options, deepcopy(settings["rank"])))
-
-    compressed = deepcopy(model)
-    replacements = []
-    for name, options, requested_rank in requests:
-        layer = compressed.get_submodule(name)
-        try:
-            if type(layer) is nn.Linear:
-                replacement = FactorizedLinear.from_linear(layer, implementation=implementation, **options)
-            else:
-                replacement = FactorizedConv.from_conv(layer, implementation=implementation, **options)
+            compressed = deepcopy(model)
         except Exception as error:
-            raise RuntimeError(f"Layer {name!r}: {options['factorization']} conversion failed: {error}") from error
-        if name:
-            parent_name, _, child_name = name.rpartition(".")
-            setattr(compressed.get_submodule(parent_name), child_name, replacement)
-        else:
-            compressed = replacement
-        replacements.append({
-            "name": name,
-            "factorization": options["factorization"],
-            "requested_rank": requested_rank,
-            "actual_rank": tuple(replacement.rank),
-        })
+            raise RuntimeError(f"Model copy failed: {error}") from error
+
+        replacements = []
+        for request in requests:
+            name, options = request["name"], request["options"]
+            replacement = _convert_selected_layer(compressed, name, options, implementation)
+            compressed = _install_replacement(compressed, name, request["aliases"], replacement)
+            replacements.append({
+                "name": name,
+                "aliases": request["aliases"],
+                "factorization": options["factorization"],
+                "requested_rank": request["requested_rank"],
+                "actual_rank": tuple(replacement.rank),
+            })
     return compressed, {"replacements": replacements}
