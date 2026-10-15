@@ -1,6 +1,8 @@
 """Model selection and copying tests; layer arithmetic is covered in Step 1."""
 
 from copy import deepcopy
+import json
+import math
 
 import pytest
 import torch
@@ -124,11 +126,27 @@ def test_nested_replacements_preserve_state_and_copy_independence(factorization,
     assert_state_values(source, original)
     assert layers == original_settings
     expected_conv_rank = (2, 2, 3, 2) if factorization == "Tucker" else (1, 1, 1, 1, 1)
-    assert report == {"replacements": [
+    expected = [
         {"name": "features.0", "aliases": [], "factorization": factorization,
          "requested_rank": convolution["rank"], "actual_rank": expected_conv_rank},
         {"name": "head", "aliases": [], "factorization": "BlockTT", "requested_rank": 1, "actual_rank": (1, 1, 1)},
-    ]}
+    ]
+    assert len(report["replacements"]) == len(expected)
+    for entry, metadata in zip(report["replacements"], expected):
+        assert {key: entry[key] for key in metadata} == metadata
+    # Tucker: core 24, factors 8+6+9+4. TT: rank-one factors 3+3+2+4.
+    # The head stores 4+6 core values and 6 biases; unchanged layers store 22.
+    replaced_count = (51 if factorization == "Tucker" else 12) + 16
+    assert report["replaced_layers"] == {
+        "original": {"parameter_count": 102, "parameter_bytes": 816, "buffer_bytes": 0},
+        "compressed": {"parameter_count": replaced_count, "parameter_bytes": replaced_count * 8,
+                       "buffer_bytes": 0},
+    }
+    assert report["model"] == {
+        "original": {"parameter_count": 124, "parameter_bytes": 992, "buffer_bytes": 88},
+        "compressed": {"parameter_count": replaced_count + 22,
+                       "parameter_bytes": (replaced_count + 22) * 8, "buffer_bytes": 88},
+    }
     assert_independent_models(source, converted)
 
 
@@ -136,7 +154,12 @@ def test_empty_selection_copies_parameters_buffers_and_modes():
     torch.manual_seed(12)
     source = SmallModel()
     converted, report = compress_model(source, {})
-    assert report == {"replacements": []}
+    zero = {"parameter_count": 0, "parameter_bytes": 0, "buffer_bytes": 0}
+    # Conv: 72, head: 24+6, unchanged linear: 12+2, BatchNorm: 4+4.
+    # Buffers: two scale values, eight running statistics, one int64 counter.
+    whole = {"parameter_count": 124, "parameter_bytes": 992, "buffer_bytes": 88}
+    assert report == {"replacements": [], "replaced_layers": {"original": zero, "compressed": zero},
+                      "model": {"original": whole, "compressed": whole}}
     assert_state_values(converted, state_values(source))
     for name, module in source.named_modules():
         assert converted.get_submodule(name) is not module
@@ -153,7 +176,7 @@ def test_empty_selection_copies_parameters_buffers_and_modes():
     ({"head": {"factorization": "Tucker", "rank": 1}}, "head.*only.*BlockTT"),
     ({"features.0": {"factorization": "BlockTT", "rank": 1}}, "features.0.*Tucker.*TT"),
     ({"head": {"factorization": "BlockTT", "rank": 1, "typo": True}}, "head.*typo"),
-    ({"head": {"factorization": "BlockTT", "rank": 1, "max_parameters": 10}}, "head.*max_parameters"),
+    ({"head": {"factorization": "BlockTT", "rank": 1, "max_parameters": 0}}, "head.*max_parameters"),
     ({"head": {"factorization": "BlockTT", "rank": 1, "decomposition_kwargs": {}}}, "head.*decomposition_kwargs"),
     ({"head": {"factorization": "BlockTT", "rank": 1, "auto_tensorize": False}}, "head.*auto_tensorize"),
     ({"head": {"factorization": "BlockTT", "rank": 1,
@@ -524,10 +547,12 @@ def test_shared_layer_is_converted_once_and_all_aliases_are_replaced(nested, sel
     assert not replacement.training
     assert_state_values(source, before)
     assert layers == settings
-    assert report == {"replacements": [{
+    expected = {
         "name": right, "aliases": [left], "factorization": "BlockTT",
         "requested_rank": [1, 1, 1, 1], "actual_rank": tuple(replacement.rank),
-    }]}
+    }
+    assert len(report["replacements"]) == 1
+    assert {key: report["replacements"][0][key] for key in expected} == expected
     assert_independent_models(source, converted)
 
 
@@ -782,3 +807,339 @@ def test_alias_installation_failure_preserves_source_rng_and_original_cause():
     assert_state_values(source, before)
     assert {name: module.training for name, module in source.named_modules()} == modes
     assert_rng_states(random_state)
+
+
+def test_blocktt_storage_includes_frozen_factors_and_bias_at_exact_cap():
+    torch.manual_seed(29)
+    source = nn.Linear(4, 6, dtype=torch.float64).eval().requires_grad_(False)
+    converted, report = compress_model(source, {"": {
+        "factorization": "BlockTT", "rank": 1, "max_parameters": 16,
+        "in_tensorized_features": (2, 2), "out_tensorized_features": (2, 3),
+    }})
+    # Two rank-one cores contain 4+6 elements; the six-element bias also counts.
+    assert [tuple(core.shape) for core in converted.weight.factors] == [(1, 2, 2, 1), (1, 3, 2, 1)]
+    assert all(not parameter.requires_grad for parameter in converted.parameters())
+    assert not converted.training
+    original = {"parameter_count": 30, "parameter_bytes": 240, "buffer_bytes": 0}
+    compressed = {"parameter_count": 16, "parameter_bytes": 128, "buffer_bytes": 0}
+    entry, = report["replacements"]
+    assert set(entry) == {"name", "aliases", "factorization", "requested_rank", "actual_rank",
+                          "max_parameters", "original", "compressed", "weight_error"}
+    assert entry["max_parameters"] == 16
+    assert entry["original"] == original
+    assert entry["compressed"] == compressed
+    assert set(entry["weight_error"]) == {"absolute", "relative"}
+    assert set(report) == {"replacements", "replaced_layers", "model"}
+    assert report["replaced_layers"] == report["model"] == {"original": original, "compressed": compressed}
+    # Serialization also rejects retained tensors and non-finite measurements.
+    json.dumps(report, allow_nan=False)
+
+
+def test_model_storage_deduplicates_aliases_and_registrations():
+    torch.manual_seed(30)
+    source = nn.Module()
+    source.selected = source.alias = nn.Linear(4, 6, dtype=torch.float64)
+    source.unchanged = nn.Linear(2, 3, dtype=torch.float32)
+    source.register_parameter("repeated_weight", source.unchanged.weight)
+    source.register_buffer("parameter_as_buffer", source.unchanged.weight)
+    source.register_buffer("statistics", torch.ones(3, dtype=torch.float64))
+    source.register_buffer("same_statistics", source.statistics, persistent=False)
+    source.unchanged.register_buffer("statistics", source.statistics)
+    source.register_buffer("scratch", torch.ones(2, dtype=torch.int16), persistent=False)
+
+    converted, report = compress_model(source, {
+        "selected": {"factorization": "BlockTT", "rank": 1, "max_parameters": 16},
+        "alias": {"factorization": "BlockTT", "rank": 1, "max_parameters": 16},
+    })
+    assert converted.selected is converted.alias
+    assert converted.repeated_weight is converted.unchanged.weight is converted.parameter_as_buffer
+    assert converted.statistics is converted.same_statistics is converted.unchanged.statistics
+    assert len(report["replacements"]) == 1
+    assert report["replaced_layers"] == {
+        "original": {"parameter_count": 30, "parameter_bytes": 240, "buffer_bytes": 0},
+        "compressed": {"parameter_count": 16, "parameter_bytes": 128, "buffer_bytes": 0},
+    }
+    # Unchanged linear: 6+3 float32 parameters. Buffers: 3 float64 + 2 int16.
+    # The repeated weight is a parameter, so it contributes no buffer bytes.
+    assert report["model"] == {
+        "original": {"parameter_count": 39, "parameter_bytes": 276, "buffer_bytes": 28},
+        "compressed": {"parameter_count": 25, "parameter_bytes": 164, "buffer_bytes": 28},
+    }
+    assert_independent_models(source, converted)
+
+
+@pytest.mark.parametrize("cap", [None, True, False, 0, -1, 16.0, "16", [16]])
+def test_invalid_caps_prevent_all_conversion(cap, monkeypatch):
+    source = SmallModel()
+    calls = forbid_decomposition(monkeypatch)
+    with pytest.raises(ValueError, match="head.*max_parameters.*positive integer"):
+        compress_model(source, {
+            "untouched": {"factorization": "BlockTT", "rank": 1},
+            "head": {"factorization": "BlockTT", "rank": 1, "max_parameters": cap},
+        })
+    assert calls == []
+
+
+@pytest.mark.parametrize("other_settings", [{}, {"max_parameters": 17}])
+def test_conflicting_alias_caps_prevent_all_conversion(other_settings, monkeypatch):
+    source = nn.ModuleDict({"first": nn.Linear(4, 6), "left": nn.Linear(4, 6)})
+    source.right = source.left
+    calls = forbid_decomposition(monkeypatch)
+    with pytest.raises(ValueError, match="left.*right.*conflicting settings"):
+        compress_model(source, {
+            "first": {"factorization": "BlockTT", "rank": 1},
+            "left": {"factorization": "BlockTT", "rank": 1, "max_parameters": 16},
+            "right": {"factorization": "BlockTT", "rank": 1, **other_settings},
+        })
+    assert calls == []
+
+
+def test_later_cap_failure_preserves_source_and_rng(monkeypatch):
+    torch.manual_seed(31)
+    source = nn.Sequential(nn.Linear(4, 6), nn.Linear(4, 6)).eval().requires_grad_(False)
+    before = state_values(source)
+    random_state = rng_states()
+    original_conversion = FactorizedLinear.from_linear
+    calls = []
+
+    def convert(layer, **options):
+        assert "max_parameters" not in options
+        calls.append(layer)
+        return original_conversion(layer, **options)
+
+    monkeypatch.setattr(FactorizedLinear, "from_linear", convert)
+    result = None
+    with pytest.raises(RuntimeError, match="Layer '1'.*max_parameters=15.*16") as error:
+        result = compress_model(source, {
+            "0": {"factorization": "BlockTT", "rank": 1, "max_parameters": 16},
+            "1": {"factorization": "BlockTT", "rank": 1, "max_parameters": 15},
+        })
+    assert result is None
+    assert len(calls) == 2 and all(layer is not source[i] for i, layer in enumerate(calls))
+    assert isinstance(error.value.__cause__, ValueError)
+    assert_state_values(source, before)
+    assert all(not module.training for module in source.modules())
+    assert all(not parameter.requires_grad for parameter in source.parameters())
+    assert_rng_states(random_state)
+
+
+def test_report_error_compares_original_weight_and_reconstructs_once(monkeypatch):
+    source = nn.Linear(2, 2, bias=False, dtype=torch.float64)
+    with torch.no_grad():
+        source.weight.copy_(torch.tensor([[3., 4.], [0., 0.]], dtype=torch.float64))
+    before = state_values(source)
+    original_conversion = FactorizedLinear.from_linear
+    reconstructions = []
+
+    def approximate(layer, **options):
+        # Simulate an approximation losing the 4; the source norm is exactly 5.
+        with torch.no_grad():
+            layer.weight[0, 1] = 0
+        replacement = original_conversion(layer, **options)
+        reconstruct = replacement.weight.to_matrix
+
+        def record_reconstruction():
+            reconstructions.append(True)
+            assert not torch.is_grad_enabled()
+            return reconstruct()
+
+        monkeypatch.setattr(replacement.weight, "to_matrix", record_reconstruction)
+        return replacement
+
+    monkeypatch.setattr(FactorizedLinear, "from_linear", approximate)
+    _, report = compress_model(source, {"": {
+        "factorization": "BlockTT", "rank": 1,
+        "in_tensorized_features": (2,), "out_tensorized_features": (2,),
+    }})
+    assert report["replacements"][0]["weight_error"] == {"absolute": 4.0, "relative": 0.8}
+    assert report["replacements"][0]["max_parameters"] is None
+    assert reconstructions == [True]
+    assert_state_values(source, before)
+
+
+@pytest.mark.parametrize("factorization", ["BlockTT", "Tucker", "TT"])
+def test_real_conversion_measures_original_weight_layout_without_autograd_or_autocast(factorization, monkeypatch):
+    torch.manual_seed(32)
+    source = (nn.Linear(4, 6) if factorization == "BlockTT" else nn.Conv2d(3, 4, (3, 2)))
+    measure = model_compression._measure_weight_error
+    captured = []
+
+    def record_measurement(original, reconstructed):
+        assert original is source.weight
+        assert not torch.is_grad_enabled()
+        assert not torch.is_autocast_enabled("cpu")
+        assert not reconstructed.requires_grad and reconstructed.grad_fn is None
+        captured.append(reconstructed.clone())
+        return measure(original, reconstructed)
+
+    monkeypatch.setattr(model_compression, "_measure_weight_error", record_measurement)
+    rank = (2, 2, 3, 2) if factorization == "Tucker" else 1
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        converted, report = compress_model(source, {"": {"factorization": factorization, "rank": rank}})
+        assert torch.is_autocast_enabled("cpu")
+    with torch.no_grad():
+        if factorization == "BlockTT":
+            expected = converted.weight.to_matrix()
+        elif factorization == "Tucker":
+            expected = converted.weight.to_tensor()
+        else:
+            # TT axes are input, height, width, output; Conv2d expects output first.
+            expected = converted.weight.to_tensor().permute(3, 0, 1, 2)
+    assert len(captured) == 1 and captured[0].shape == source.weight.shape
+    torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
+    expected_absolute = torch.linalg.vector_norm(expected.double() - source.weight.double()).item()
+    expected_relative = expected_absolute / torch.linalg.vector_norm(source.weight.double()).item()
+    assert report["replacements"][0]["weight_error"] == pytest.approx({
+        "absolute": expected_absolute, "relative": expected_relative,
+    })
+    assert all(parameter.requires_grad for parameter in converted.parameters())
+    assert converted.training == source.training
+
+
+@pytest.mark.parametrize("approximation,absolute,relative", [
+    ([0., 0.], 0., 0.), ([3., 4.], 5., None),
+])
+def test_zero_source_weight_errors(approximation, absolute, relative):
+    error = model_compression._measure_weight_error(
+        torch.zeros(2, dtype=torch.float64), torch.tensor(approximation, dtype=torch.float64))
+    assert error == {"absolute": absolute, "relative": relative}
+
+
+@pytest.mark.parametrize("scale", [1e300, 1e-300, 5e-324])
+def test_weight_error_scales_norms_before_squaring(scale):
+    original = torch.tensor([3 * scale, 4 * scale], dtype=torch.float64)
+    reconstructed = torch.tensor([3 * scale, 0.], dtype=torch.float64)
+    error = model_compression._measure_weight_error(original, reconstructed)
+    assert error["absolute"] == pytest.approx(4 * scale, rel=1e-14, abs=0)
+    assert error["relative"] == pytest.approx(0.8, rel=1e-14, abs=0)
+
+
+def test_weight_error_promotes_before_subtraction():
+    original = torch.tensor([3e38], dtype=torch.float32)
+    error = model_compression._measure_weight_error(original, -original)
+    assert math.isfinite(error["absolute"])
+    assert error["absolute"] == 2 * original.item()
+    assert error["relative"] == 2.0
+
+
+def test_relative_error_does_not_require_a_representable_source_norm():
+    original = torch.tensor([1e308, 1e308, 1e308, 1e308, 4e307], dtype=torch.float64)
+    reconstructed = original.clone()
+    reconstructed[-1] = 0
+    error = model_compression._measure_weight_error(original, reconstructed)
+    assert error["absolute"] == 4e307
+    assert error["relative"] == pytest.approx(1 / math.sqrt(26))
+
+
+def test_representable_subnormal_relative_error_is_not_lost():
+    original = torch.tensor([1e308, 1e-15], dtype=torch.float64)
+    reconstructed = torch.tensor([1e308, 0.], dtype=torch.float64)
+    error = model_compression._measure_weight_error(original, reconstructed)
+    assert error == {"absolute": 1e-15, "relative": 1e-323}
+
+
+@pytest.mark.parametrize("original,reconstructed,description", [
+    ([1e308] * 4, [0.] * 4, "absolute"),
+    ([1e-308], [1e308], "relative"),
+    ([1e308, 5e-324], [1e308, 0.], "relative"),
+])
+def test_unrepresentable_weight_error_fails(original, reconstructed, description):
+    with pytest.raises(ValueError, match=f"{description}.*finite"):
+        model_compression._measure_weight_error(torch.tensor(original, dtype=torch.float64),
+                                               torch.tensor(reconstructed, dtype=torch.float64))
+
+
+@pytest.mark.parametrize("location", ["layer", "weight-error", "original-model", "compressed-model"])
+def test_measurement_failure_preserves_context_source_and_rng(location, monkeypatch):
+    torch.manual_seed(33)
+    source = nn.Sequential(nn.Linear(4, 6))
+    before = state_values(source)
+    random_state = rng_states()
+    measure = model_compression._measure_storage
+    failure = RuntimeError("injected measurement failure")
+
+    def fail_measurement(modules):
+        modules = list(modules)
+        fail = ((location == "layer" and any(isinstance(m, FactorizedLinear) for m in modules))
+                or (location == "original-model" and source in modules)
+                or (location == "compressed-model" and any(type(m) is nn.Sequential and m is not source
+                                                          for m in modules)))
+        if fail:
+            torch.rand(3)
+            raise failure
+        return measure(modules)
+
+    def fail_weight_measurement(original, reconstructed):
+        torch.rand(3)
+        raise failure
+
+    if location == "weight-error":
+        monkeypatch.setattr(model_compression, "_measure_weight_error", fail_weight_measurement)
+    else:
+        monkeypatch.setattr(model_compression, "_measure_storage", fail_measurement)
+    context = "Layer '0'" if location in ("layer", "weight-error") else "Model storage measurement failed"
+    result = None
+    with pytest.raises(RuntimeError, match=f"{context}.*injected measurement failure") as error:
+        result = compress_model(source, {"0": {"factorization": "BlockTT", "rank": 1}})
+    assert result is None
+    assert error.value.__cause__ is failure
+    assert_state_values(source, before)
+    assert_rng_states(random_state)
+
+
+def test_unmeasurable_unselected_parameter_fails_with_model_context():
+    source = nn.Sequential(nn.LazyLinear(3))
+    random_state = rng_states()
+    with pytest.raises(RuntimeError, match="Model storage measurement failed.*uninitialized") as error:
+        compress_model(source, {})
+    assert isinstance(error.value.__cause__, ValueError)
+    assert source[0].has_uninitialized_params()
+    assert_rng_states(random_state)
+
+
+@pytest.mark.parametrize("kind", ["sparse_coo", "sparse_csr", "meta"])
+@pytest.mark.parametrize("registration", ["parameter", "buffer"])
+@pytest.mark.parametrize("empty", [False, True], ids=["unchanged-layer", "empty-selection"])
+@pytest.mark.filterwarnings("ignore:Sparse CSR tensor support is in beta state:UserWarning")
+def test_unsupported_storage_preserves_source_and_rng(kind, registration, empty, monkeypatch):
+    torch.manual_seed(35)
+    source = nn.ModuleDict({"selected": nn.Linear(4, 6), "unchanged": nn.Module()}).eval()
+    tensor = torch.tensor([[1., 0.], [0., 2.]])
+    if kind == "sparse_coo":
+        tensor = tensor.to_sparse()
+    elif kind == "sparse_csr":
+        tensor = tensor.to_sparse_csr()
+    else:
+        tensor = tensor.to(device="meta")
+    if registration == "parameter":
+        source.unchanged.register_parameter("payload", nn.Parameter(tensor, requires_grad=False))
+    else:
+        source.unchanged.register_buffer("payload", tensor, persistent=False)
+    payload = source.unchanged.payload
+    before_payload = payload.detach().clone()
+    before = state_values(source)
+    random_state = rng_states()
+    calls = forbid_decomposition(monkeypatch)
+    layers = {} if empty else {"selected": {"factorization": "BlockTT", "rank": 1}}
+    result = None
+
+    message = f"Model storage measurement failed.*unchanged.payload.*{kind}.*unsupported by this report"
+    with pytest.raises(RuntimeError, match=message) as error:
+        result = compress_model(source, layers)
+    assert result is None
+    assert isinstance(error.value.__cause__, ValueError)
+    assert calls == []
+    assert source.unchanged.payload is payload
+    # Meta has shape/dtype metadata but no values; assert_close checks that metadata.
+    # Check the payload separately because state_dict omits nonpersistent buffers.
+    torch.testing.assert_close(payload, before_payload, rtol=0, atol=0)
+    assert_state_values(source, before)
+    assert all(not module.training for module in source.modules())
+    assert not payload.requires_grad
+    assert_rng_states(random_state)
+
+
+def test_public_import():
+    from tltorch import compress_model as public_compress_model
+
+    assert public_compress_model is compress_model

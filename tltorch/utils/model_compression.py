@@ -1,7 +1,4 @@
-"""Select and convert ordinary layers in an independent model copy.
-
-Storage/error measurements and parameter caps remain separate work.
-"""
+"""Convert selected layers in a model copy and measure storage and weight error."""
 
 from collections.abc import Mapping
 from copy import deepcopy
@@ -128,7 +125,7 @@ def _prepare_conversion_options(layer, settings):
         raise ValueError("factorization must be BlockTT for Linear, or Tucker/TT for Conv2d")
 
     factorization = factorization.lower()
-    allowed = {"factorization", "rank"}
+    allowed = {"factorization", "rank", "max_parameters"}
     if type(layer) is nn.Linear:
         if factorization != "blocktt":
             raise ValueError("nn.Linear supports only factorization='BlockTT'")
@@ -206,6 +203,11 @@ def _collect_requests(model, layers):
         layer = modules[name]
         try:
             options = _prepare_conversion_options(layer, settings)
+            max_parameters = None
+            if "max_parameters" in settings:
+                if not _is_positive_integer(settings["max_parameters"]):
+                    raise ValueError("max_parameters must be a positive integer, excluding booleans")
+                max_parameters = int(settings["max_parameters"])
             for parameter_name in ("weight", "bias"):
                 parameter = getattr(layer, parameter_name)
                 for owner, path in tensor_owners.get(id(parameter), []):
@@ -219,7 +221,8 @@ def _collect_requests(model, layers):
         if previous is not None:
             # Python equates 1 and 1.0; rank treats them as a size and a storage target.
             same_rank_kind = type(options["rank"]) is type(previous["options"]["rank"])
-            if options != previous["options"] or not same_rank_kind:
+            if (options != previous["options"] or not same_rank_kind
+                    or max_parameters != previous["max_parameters"]):
                 raise ValueError(f"Layers {previous['name']!r} and {name!r}: "
                                  "conflicting settings for the same shared layer")
             continue
@@ -227,9 +230,84 @@ def _collect_requests(model, layers):
             "name": name,
             "aliases": [alias for alias in aliases[id(layer)] if alias != name],
             "options": options,
-            "requested_rank": deepcopy(settings["rank"]),
+            "requested_rank": list(options["rank"]) if isinstance(settings["rank"], list) else options["rank"],
+            "max_parameters": max_parameters,
         }
     return list(requests.values())
+
+
+@torch.no_grad()
+def _measure_storage(modules):
+    """Count registered tensor payloads once, with parameters taking precedence."""
+    parameters, buffers = {}, {}
+    for root in modules:
+        for module_name, module in root.named_modules():
+            for registrations, collected in ((module._parameters, parameters), (module._buffers, buffers)):
+                for name, tensor in registrations.items():
+                    if tensor is None:
+                        continue
+                    path = f"{module_name}.{name}" if module_name else name
+                    if tensor.device.type == "meta":
+                        raise ValueError(f"{path!r}: meta tensor storage is unsupported by this report; "
+                                         "meta tensors have no materialized data")
+                    if tensor.layout != torch.strided:
+                        raise ValueError(f"{path!r}: {tensor.layout} tensor storage is unsupported by this report; "
+                                         "only strided tensor storage can be measured")
+                    collected[id(tensor)] = tensor
+
+    # Collect both categories first: a buffer may also be a parameter elsewhere.
+    return {
+        "parameter_count": sum(tensor.numel() for tensor in parameters.values()),
+        "parameter_bytes": sum(tensor.numel() * tensor.element_size() for tensor in parameters.values()),
+        "buffer_bytes": sum(tensor.numel() * tensor.element_size()
+                            for identity, tensor in buffers.items() if identity not in parameters),
+    }
+
+
+def _scaled_norm(tensor):
+    """Return a scale and a normalized norm, avoiding squares of extreme values."""
+    if tensor.numel() == 0:
+        return 0.0, 0.0
+    scale = tensor.abs().max()
+    scale_value = scale.item()
+    if scale_value == 0:
+        return 0.0, 0.0
+    return scale_value, torch.linalg.vector_norm(tensor / scale).item()
+
+
+@torch.no_grad()
+def _measure_weight_error(original, reconstructed):
+    """Measure Frobenius errors without forming an overflowing source norm."""
+    if original.shape != reconstructed.shape:
+        raise ValueError(f"reconstructed weight shape {tuple(reconstructed.shape)} "
+                         f"does not match source shape {tuple(original.shape)}")
+    with torch.autocast(device_type=original.device.type, enabled=False):
+        # Promotion must precede subtraction: opposite float32 values can overflow.
+        original = original.to(dtype=torch.float64)
+        difference = reconstructed.to(dtype=torch.float64) - original
+        _require_finite(difference, "weight difference")
+        error_scale, error_norm = _scaled_norm(difference)
+        source_scale, source_norm = _scaled_norm(original)
+        absolute = error_scale * error_norm
+        if not math.isfinite(absolute):
+            raise ValueError("absolute weight error cannot be represented as a finite number")
+        if error_scale == 0:
+            relative = 0.0
+        elif source_scale == 0:
+            relative = None
+        else:
+            # Separate powers of two so neither the source norm nor the ratio of
+            # scales needs to fit in a float before the final result is computed.
+            error_fraction, error_exponent = math.frexp(error_scale)
+            source_fraction, source_exponent = math.frexp(source_scale)
+            ratio = (error_fraction / source_fraction) * (error_norm / source_norm)
+            try:
+                relative = math.ldexp(ratio, error_exponent - source_exponent)
+            except OverflowError as error:
+                raise ValueError("relative weight error cannot be represented as a finite number") from error
+            if relative == 0:
+                raise ValueError("relative weight error cannot be represented as a nonzero finite number")
+    return {"absolute": absolute, "relative": relative}
 
 
 @torch.no_grad()
@@ -243,21 +321,31 @@ def _validate_replacement(replacement, factorization):
         # TT puts output channels last; use the existing kernel-layout conversion.
         weight = tensor_to_kernel(factorization, replacement.weight.to_tensor())
     _require_finite(weight, "reconstructed weight")
+    return weight
 
 
-def _convert_selected_layer(model, name, options, implementation):
-    """Convert a layer in the copied model, preserving precision and error context."""
+def _convert_selected_layer(model, source_model, name, options, implementation, max_parameters):
+    """Convert and measure a copied layer, enforcing its cap with layer context."""
     try:
         layer = model.get_submodule(name)
+        source = source_model.get_submodule(name)
         with torch.autocast(device_type=layer.weight.device.type, enabled=False):
             if type(layer) is nn.Linear:
                 replacement = FactorizedLinear.from_linear(layer, implementation=implementation, **options)
             else:
                 replacement = FactorizedConv.from_conv(layer, implementation=implementation, **options)
-            _validate_replacement(replacement, options["factorization"])
+            weight = _validate_replacement(replacement, options["factorization"])
+            with torch.no_grad():
+                original_storage = _measure_storage([source])
+                compressed_storage = _measure_storage([replacement])
+                if max_parameters is not None and compressed_storage["parameter_count"] > max_parameters:
+                    raise ValueError(f"max_parameters={max_parameters} exceeded: "
+                                     f"replacement stores {compressed_storage['parameter_count']} parameters")
+                weight_error = _measure_weight_error(source.weight, weight)
     except Exception as error:
         raise RuntimeError(f"Layer {name!r}: {options['factorization']} conversion failed: {error}") from error
-    return replacement
+    return replacement, {"original": original_storage, "compressed": compressed_storage,
+                         "weight_error": weight_error}
 
 
 def _install_replacement(model, name, aliases, replacement):
@@ -276,37 +364,82 @@ def _install_replacement(model, name, aliases, replacement):
 
 
 def compress_model(model, layers, *, implementation="factorized"):
-    """Replace named layers in an independent deep copy of ``model``.
+    """Replace selected layers in an independent copy and report the actual result.
 
-    ``layers`` maps exact registered module names to settings. Each entry requires
-    ``factorization`` and ``rank``. Linear supports BlockTT, optionally with both
-    tensorized feature tuples. Conv2d supports Tucker or TT; only Tucker accepts
-    ``fixed_rank_modes="spatial"``. The empty name selects the root module itself.
+    ``layers`` maps exact registered module names to settings; the empty name
+    selects the root. Each entry requires ``factorization`` and ``rank``. Linear
+    supports BlockTT, optionally with both ``in_tensorized_features`` and
+    ``out_tensorized_features``. Conv2d supports Tucker or TT; only Tucker accepts
+    ``fixed_rank_modes="spatial"``. ``implementation`` is ``"factorized"`` (default)
+    or ``"reconstructed"`` and controls how replacements execute their forward pass.
 
-    Selected layers may register only ``weight`` and ``bias`` parameters, with
-    no buffers or child modules: conversion cannot preserve extra registered state
-    in this version. This restriction does not apply to unselected layers or model
-    containers.
+    The optional ``max_parameters`` must be a positive integer, excluding booleans.
+    It caps all stored replacement parameter elements, including bias and frozen
+    parameters, but not buffers. Exceeding it raises an error without retrying ranks.
+    A floating-point rank requests an approximate weight-storage target excluding
+    bias; it is not an exact parameter cap. Neither option optimizes a model budget.
 
-    Shared layers are converted once and replaced at every registered path.
-    Selected aliases must have compatible settings. Weight or bias tensors tied
-    to a different module are rejected; overlapping storage in distinct tensors
-    is outside the supported scope.
+    Return ``(compressed_model, report)``. The report contains:
 
-    Return ``(compressed_model, {"replacements": [...]})``. Each replacement records
-    the first selected name, its other registered names in ``aliases``, the
-    factorization, requested rank, and actual rank. All requests are validated
-    before copying or decomposing. Only the copy is modified; no forward passes
-    or model-wide training-mode changes are performed.
+    - ``replacements``: one entry per unique converted layer, with ``name``,
+      ``aliases``, ``factorization``, ``requested_rank``, ``actual_rank``,
+      ``max_parameters`` (None when omitted), ``original``, ``compressed``, and
+      ``weight_error``.
+    - ``replaced_layers`` and ``model``: each has ``original`` and ``compressed``
+      storage measurements. The model totals include unchanged layers.
 
-    Copying and conversion preserve the caller's PyTorch CPU and CUDA RNG states,
-    including on failure. Conversion and reconstruction run with autocast disabled
-    for the layer's device, restoring the caller's context afterward. Source
-    weights/biases, replacement parameters, and reconstructed weights must be
-    finite. Failures raise an error instead of returning a partial model.
+    Each storage measurement has ``parameter_count`` (elements, not objects),
+    ``parameter_bytes``, and ``buffer_bytes``. Count actual factor parameters,
+    biases, frozen parameters, and all registered buffers, including nonpersistent
+    buffers. Bytes are ``numel() * element_size()``. Tensor object identity prevents
+    double counting; an object registered as both a parameter and a buffer counts
+    only as a parameter. Distinct tensors sharing storage are outside this contract.
+    These are tensor payloads, excluding gradients, activations, optimizer state,
+    temporary tensors, and allocator overhead, not peak memory or checkpoint size.
+    Reporting requires strided tensors with materialized data. Sparse and other
+    non-strided layouts need different accounting; meta tensors have no stored data.
+    Their storage is unsupported by this report, even in unchanged layers or with
+    an empty selection, so encountering them raises an error.
 
-    Storage/error measurements, parameter caps, and the top-level public export
-    remain deferred.
+    ``weight_error`` contains Python floats ``absolute`` (Frobenius norm of the
+    reconstructed minus original weight) and ``relative`` (absolute divided by
+    the original norm). For zero source weights, relative is 0.0 for an exact zero
+    reconstruction and None otherwise. Norms use scaling and float64 arithmetic;
+    unrepresentable results raise errors. The report retains no tensors or graphs.
+    Weight error does not establish task accuracy; evaluate the compressed model.
+    An empty selection returns an independent copy, no replacements, zero replaced
+    totals, and measured whole-model totals.
+
+    Selected layers must be ordinary, initialized Linear or Conv2d modules on CPU
+    or CUDA in float32 or float64. Convolutions require groups=1, numeric padding,
+    and zero padding mode. Selected custom subclasses, hooks, parametrizations,
+    sparse/quantized tensors, and already-factorized layers are unsupported. Selected
+    layers may register only weight and bias parameters, with no buffers or children.
+    These restrictions do not apply to unchanged layers, but their storage must be
+    measurable. Custom code reading a selected layer's dense weight is unsupported.
+
+    Shared layers are converted once and replaced at every registered path. Selected
+    aliases must have compatible settings, including identical caps or all omitting
+    the cap. Weight or bias tensors tied to a different module are rejected.
+
+    Validate all requests before copying or decomposing. Only the copy is modified;
+    no forward passes or model-wide training-mode changes occur. CPU and CUDA RNG
+    states are preserved through copying, conversion, measurements, and failures.
+    Conversion and reconstruction disable autocast; measurements build no autograd
+    graph. Preserve source dtype/device, bias, training mode, and trainability.
+    Source weights/biases, replacement parameters, and reconstructed weights must
+    be finite. Failures raise contextual errors instead of returning a partial model.
+    Create a new optimizer for further training; optimizer state is not transferred.
+
+    Example::
+
+        from tltorch import compress_model
+
+        compressed, report = compress_model(model, {
+            "classifier": {"factorization": "BlockTT", "rank": 0.5,
+                           "max_parameters": 10000},
+        })
+        print(report["model"]["compressed"]["parameter_bytes"])
     """
     if not isinstance(model, nn.Module):
         raise TypeError("model must be an nn.Module")
@@ -319,6 +452,11 @@ def compress_model(model, layers, *, implementation="factorized"):
     # fork_rng also protects CPU state and works with an empty CUDA device list.
     with torch.random.fork_rng(devices=range(torch.cuda.device_count())):
         requests = _collect_requests(model, layers)
+        # Sparse tensors can fail during deepcopy; report the storage limitation first.
+        try:
+            original_model_storage = _measure_storage([model])
+        except Exception as error:
+            raise RuntimeError(f"Model storage measurement failed: {error}") from error
         try:
             compressed = deepcopy(model)
         except Exception as error:
@@ -327,13 +465,29 @@ def compress_model(model, layers, *, implementation="factorized"):
         replacements = []
         for request in requests:
             name, options = request["name"], request["options"]
-            replacement = _convert_selected_layer(compressed, name, options, implementation)
+            replacement, measurements = _convert_selected_layer(
+                compressed, model, name, options, implementation, request["max_parameters"])
             compressed = _install_replacement(compressed, name, request["aliases"], replacement)
             replacements.append({
                 "name": name,
                 "aliases": request["aliases"],
                 "factorization": options["factorization"],
                 "requested_rank": request["requested_rank"],
-                "actual_rank": tuple(replacement.rank),
+                "actual_rank": tuple(int(rank) for rank in replacement.rank),
+                "max_parameters": request["max_parameters"],
+                **measurements,
             })
-    return compressed, {"replacements": replacements}
+
+        try:
+            report = {
+                "replacements": replacements,
+                "replaced_layers": {
+                    "original": _measure_storage(model.get_submodule(r["name"]) for r in requests),
+                    "compressed": _measure_storage(compressed.get_submodule(r["name"]) for r in requests),
+                },
+                "model": {"original": original_model_storage,
+                          "compressed": _measure_storage([compressed])},
+            }
+        except Exception as error:
+            raise RuntimeError(f"Model storage measurement failed: {error}") from error
+    return compressed, report

@@ -16,3 +16,5 @@ from .factorized_tensors import (ComplexCPTensorized, ComplexBlockTT,
                                  ComplexDenseTensorized, ComplexTuckerTensorized)
 from .tensor_hooks import (tensor_lasso, remove_tensor_lasso,
                            tensor_dropout, remove_tensor_dropout)
+
+from .utils.model_compression import compress_model
