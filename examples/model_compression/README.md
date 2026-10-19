@@ -91,8 +91,8 @@ if available, or omit it and retain the saved per-image hashes as provenance.
 To reuse weights stored elsewhere, export `TORCH_HOME="/path/to/torch-cache"`
 before running setup or starting Jupyter. Set it to the cache root containing
 `hub/checkpoints/resnet18-f37072fd.pth`, not to the checkpoint file itself. The
-reusable commands preserve an existing `TORCH_HOME`, and the notebook
-respects it. Cached weights are reused; a missing cache raises an error unless
+reusable commands preserve an existing `TORCH_HOME`, and both notebooks
+respect it. Cached weights are reused; a missing cache raises an error unless
 the command-line experiment explicitly receives `--allow-weight-download`.
 
 ## Run the comparison
@@ -380,3 +380,92 @@ import without torchvision/network use, a tiny conversion/measurement run, and
 CSV formatting that leaves the numerical measurements unchanged.
 They download nothing. The image-decoding check skips if Pillow is absent. Library
 tests under `tltorch/` have no new torchvision, notebook, or dataset requirement.
+
+## Optional opt_einsum comparison
+
+`opt_einsum_comparison.ipynb` runs a separate synthetic-input experiment: does
+PyTorch's opt_einsum integration change the BlockTT classifier's latency, and is
+that change visible in the complete model? It compares disabled against enabled
+with strategy `"auto"`, using the same stored weights and model objects. TensorLy's
+separate opt_einsum plugin stays inactive. No accuracy evaluation or download runs.
+
+Use a **new environment**. Adding opt_einsum to the original environment could
+automatically enable PyTorch's integration and change subsequent results. The
+commands below reproduce this run: Python **3.12.3**, torch **2.5.1+cpu**,
+torchvision **0.20.1+cpu**, TensorLy **0.9.0**, NumPy **2.5.2**, SciPy **1.17.1**,
+and optional **opt_einsum 3.4.0**. `requirements-opt-einsum.txt` pins all other
+packages to the versions inspected in the original environment. Neither the
+original notebook environment nor the shared MPO environment is modified.
+
+From the repository root:
+
+```bash
+EXAMPLE_CACHE="$HOME/.cache/tltorch-model-compression"
+COMPARISON_PY="$EXAMPLE_CACHE/venv-opt-einsum/bin/python"
+"$EXAMPLE_CACHE/venv/bin/python" -B -m venv "$EXAMPLE_CACHE/venv-opt-einsum"
+"$COMPARISON_PY" -B -m pip install torch==2.5.1+cpu torchvision==0.20.1+cpu \
+  --index-url https://download.pytorch.org/whl/cpu
+"$COMPARISON_PY" -B -m pip install -r examples/model_compression/requirements-opt-einsum.txt
+"$COMPARISON_PY" -B -m ipykernel install --prefix "$EXAMPLE_CACHE/venv-opt-einsum" \
+  --name tltorch-opt-einsum --display-name "TensorLy opt_einsum comparison"
+export PYTHONDONTWRITEBYTECODE=1
+export TORCH_HOME="${TORCH_HOME:-$EXAMPLE_CACHE/torch}"
+export JUPYTER_PATH="$EXAMPLE_CACHE/venv-opt-einsum/share/jupyter"
+export IPYTHONDIR="$EXAMPLE_CACHE/opt-einsum-comparison/ipython"
+export JUPYTER_RUNTIME_DIR="$EXAMPLE_CACHE/opt-einsum-comparison/jupyter-runtime"
+export MPLCONFIGDIR="$EXAMPLE_CACHE/opt-einsum-comparison/matplotlib"
+"$COMPARISON_PY" -B - <<'PYNOTEBOOK'
+from pathlib import Path
+import nbformat
+from nbclient import NotebookClient
+path = Path('examples/model_compression/opt_einsum_comparison.ipynb')
+notebook = nbformat.read(path, as_version=4)
+NotebookClient(notebook, timeout=600, kernel_name='tltorch-opt-einsum',
+               resources={'metadata': {'path': str(path.parent.resolve())}}).execute()
+nbformat.write(notebook, path)
+PYNOTEBOOK
+```
+
+The executed notebook retains its tables and two-panel plot. To repeat it, change
+`output_directory` to an unused name and **save the notebook before execution**;
+`results/opt_einsum_run_001/` already contains the delivered run and cannot be
+overwritten. Loading and conversion explicitly disable the integration. Each
+classifier's features are captured once, before any timing. Temporary tracing
+proves enabled forwards use opt_einsum, and is removed before measurements.
+
+Four rounds run in one fresh kernel with alternating condition order and rotating
+model order. Each block uses CPU float32, four threads, one inter-op thread,
+evaluation/inference mode, batch one, 20 warm-ups, and 100 measured passes. The
+notebook reports every block's median and quartiles. Its summary takes the median
+of four **per-round speedup ratios**, not pooled samples or the fastest round.
+PyTorch's per-forward path-search cost is included in the enabled timings.
+
+The new result directory contains `results.csv`, all raw samples in
+`timing_blocks.json`, `output_agreement.json`, `optimizer_use.json`,
+`compression_reports.json`, `configuration.json`, and `comparison.png`.
+`validation.json` records the post-execution checks, full working-tree status,
+and exact environment setup commands. Configuration records actual backend flags, package versions, hardware, seeds,
+code hashes, and unchanged model/feature fingerprints. The correctness tolerance
+is fixed at `rtol=1e-4, atol=1e-5`; this checks execution agreement, not task accuracy.
+
+The small offline helper checks require no cached weights or timing thresholds:
+
+```bash
+OMP_NUM_THREADS=1 "$COMPARISON_PY" -B -m pytest -q -p no:cacheprovider \
+  examples/model_compression/tests/test_opt_einsum_comparison.py \
+  examples/model_compression/tests/test_experiment.py
+```
+
+The flag-dependent checks skip when opt_einsum is absent. It remains optional for
+the example and is not added to library dependencies or ordinary library tests.
+
+In the saved four-round run, auto was slower for both compressed classifiers in
+every round: 65–69% longer for target 0.75 and 78–84% for target 0.50. Whole-model
+latency increased by 2.1–2.6%. The median of four per-round speedup ratios was
+0.599× / 0.551× for the classifiers and about 0.978× for each complete model.
+Dense control ratios stayed near one. All output checks passed; the largest
+absolute difference was 1.43e-6. Keep the integration disabled for this CPU,
+batch-one experiment. Path-search cost is included, but was not isolated from
+the cost of executing the chosen path. These measurements do not establish
+performance on other hardware or new task accuracy. The executed notebook shows
+every round and its quartiles; no prior result was replaced.

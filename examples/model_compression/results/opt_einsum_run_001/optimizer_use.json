@@ -1,0 +1,148 @@
+{
+  "fraction_0.75": [
+    {
+      "enabled": false,
+      "calls": [],
+      "backend": {
+        "available": true,
+        "enabled": false,
+        "strategy": "auto",
+        "tensorly_backend": "pytorch",
+        "tensorly_tenalg_backend": "core",
+        "tensorly_default_einsum": true,
+        "tensorly_plugin_inactive": true,
+        "tensorly_plugin_cache_entries": 0,
+        "threads": 4,
+        "interop_threads": 1,
+        "matmul_precision": "highest",
+        "deterministic_algorithms": true,
+        "mkldnn_enabled": true,
+        "autocast_enabled": false
+      }
+    },
+    {
+      "enabled": true,
+      "calls": [
+        {
+          "equation": "abcd,hebi,ifcj,jgdk->aefg",
+          "operand_shapes": [
+            [
+              1,
+              8,
+              8,
+              8
+            ],
+            [
+              1,
+              10,
+              8,
+              68
+            ],
+            [
+              68,
+              10,
+              8,
+              68
+            ],
+            [
+              68,
+              10,
+              8,
+              1
+            ]
+          ],
+          "strategy": "auto"
+        }
+      ],
+      "backend": {
+        "available": true,
+        "enabled": true,
+        "strategy": "auto",
+        "tensorly_backend": "pytorch",
+        "tensorly_tenalg_backend": "core",
+        "tensorly_default_einsum": true,
+        "tensorly_plugin_inactive": true,
+        "tensorly_plugin_cache_entries": 0,
+        "threads": 4,
+        "interop_threads": 1,
+        "matmul_precision": "highest",
+        "deterministic_algorithms": true,
+        "mkldnn_enabled": true,
+        "autocast_enabled": false
+      }
+    }
+  ],
+  "fraction_0.50": [
+    {
+      "enabled": false,
+      "calls": [],
+      "backend": {
+        "available": true,
+        "enabled": false,
+        "strategy": "auto",
+        "tensorly_backend": "pytorch",
+        "tensorly_tenalg_backend": "core",
+        "tensorly_default_einsum": true,
+        "tensorly_plugin_inactive": true,
+        "tensorly_plugin_cache_entries": 0,
+        "threads": 4,
+        "interop_threads": 1,
+        "matmul_precision": "highest",
+        "deterministic_algorithms": true,
+        "mkldnn_enabled": true,
+        "autocast_enabled": false
+      }
+    },
+    {
+      "enabled": true,
+      "calls": [
+        {
+          "equation": "abcd,hebi,ifcj,jgdk->aefg",
+          "operand_shapes": [
+            [
+              1,
+              8,
+              8,
+              8
+            ],
+            [
+              1,
+              10,
+              8,
+              56
+            ],
+            [
+              56,
+              10,
+              8,
+              56
+            ],
+            [
+              56,
+              10,
+              8,
+              1
+            ]
+          ],
+          "strategy": "auto"
+        }
+      ],
+      "backend": {
+        "available": true,
+        "enabled": true,
+        "strategy": "auto",
+        "tensorly_backend": "pytorch",
+        "tensorly_tenalg_backend": "core",
+        "tensorly_default_einsum": true,
+        "tensorly_plugin_inactive": true,
+        "tensorly_plugin_cache_entries": 0,
+        "threads": 4,
+        "interop_threads": 1,
+        "matmul_precision": "highest",
+        "deterministic_algorithms": true,
+        "mkldnn_enabled": true,
+        "autocast_enabled": false
+      }
+    }
+  ]
+}
