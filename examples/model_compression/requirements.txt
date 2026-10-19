@@ -1,0 +1,11 @@
+# Optional example dependencies. Install the torch/torchvision pair separately;
+# see README.md for the CPU wheel index and exact setup commands.
+tensorly==0.9.0
+numpy==2.5.2
+scipy==1.17.1
+Pillow==12.3.0
+pytest==9.1.1
+nbformat==5.11.1
+nbclient==0.11.0
+ipykernel==7.3.0
+matplotlib==3.10.8
