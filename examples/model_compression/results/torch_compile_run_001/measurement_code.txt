@@ -1,0 +1,344 @@
+import csv
+import hashlib
+import importlib.metadata
+import json
+import os
+from pathlib import Path
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+from datetime import datetime, timezone
+
+repository = next(path for path in [Path.cwd(), *Path.cwd().parents] if (path / "tltorch").is_dir())
+example_directory = repository / "examples/model_compression"
+output_directory = example_directory / "results/torch_compile_run_001"
+output_directory.mkdir(parents=True, exist_ok=False)
+diagnostic_directory = output_directory / "diagnostics"
+diagnostic_directory.mkdir()
+
+cache_directory = Path.home() / ".cache/tltorch-model-compression"
+compiler_cache_parent = cache_directory / "torch-compile"
+compiler_cache_parent.mkdir(parents=True, exist_ok=True)
+compiler_cache = Path(tempfile.mkdtemp(prefix="inductor-", dir=compiler_cache_parent))
+previous_compiler_cache_setting = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(compiler_cache)
+os.environ.setdefault("TORCH_HOME", str(cache_directory / "torch"))
+
+import matplotlib.pyplot as plt
+import torch
+import torch.backends.opt_einsum as torch_opt_einsum
+import tensorly as tl
+from torch._inductor import config as inductor_config
+from torch._inductor.cpp_builder import get_cpp_compiler
+from IPython.display import Markdown, display
+
+sys.path.insert(0, str(repository))
+import tltorch
+from tltorch import compress_model
+from examples.model_compression import experiment
+from examples.model_compression import opt_einsum_comparison
+from examples.model_compression import torch_compile_comparison as comparison
+
+assert torch.__version__ == "2.5.1+cpu"
+assert Path(tltorch.__file__).resolve() == repository / "tltorch/__init__.py"
+torch_opt_einsum.enabled = False
+tl.set_backend("pytorch")
+tl.tenalg.set_backend("core")
+
+def show_table(columns, rows):
+    """Render a small table without adding a dataframe dependency."""
+    lines = [" | ".join(columns), " | ".join("---" for _ in columns)]
+    lines.extend(" | ".join(str(value) for value in row) for row in rows)
+    display(Markdown("\n".join(lines)))
+
+def save_json(filename, contents):
+    (output_directory / filename).write_text(json.dumps(contents, indent=2, allow_nan=False) + "\n")
+
+
+settings = {
+    "device": "cpu", "dtype": "float32", "threads": 4, "interop_threads": 1,
+    "conversion_seed": 2026, "input_seeds": [2027, 2028, 2029],
+    "batch_size": 1, "rounds": 4, "warmup": 20, "repeats": 100,
+    "rtol": 1e-4, "atol": 1e-5, "compiler_backend": "inductor", "compiler_mode": "default",
+}
+device = experiment.configure_runtime(settings["device"], settings["threads"])
+inputs = [torch.randn(1, 3, 224, 224, dtype=torch.float32, device=device,
+                      generator=torch.Generator(device=device).manual_seed(seed))
+          for seed in settings["input_seeds"]]
+timing_input = inputs[0]
+initial_backend = comparison.checked_backend_settings()
+assert initial_backend["threads"] == 4 and initial_backend["interop_threads"] == 1
+initial_cache = comparison.cache_inventory(compiler_cache)
+assert initial_cache["files"] == 0
+
+compiler_command = get_cpp_compiler()
+compiler = {
+    "command": compiler_command, "path": shutil.which(compiler_command),
+    "version": subprocess.check_output([compiler_command, "--version"], text=True),
+    "compile_threads": inductor_config.compile_threads,
+    "fx_graph_cache": inductor_config.fx_graph_cache,
+    "suppress_errors": torch._dynamo.config.suppress_errors,
+    "dynamo_cache_size_limit": torch._dynamo.config.cache_size_limit,
+}
+environment = experiment.environment_info()
+environment["python_executable"] = sys.executable
+environment["packages"] = {distribution.metadata["Name"]: distribution.version
+                           for distribution in importlib.metadata.distributions()}
+environment["working_tree_status"] = subprocess.check_output(
+    ["git", "status", "--short", "--untracked-files=all"], cwd=repository, text=True)
+environment["helper_sha256"] = {Path(module.__file__).name: experiment.file_sha256(module.__file__)
+                                for module in (experiment, comparison, opt_einsum_comparison)}
+notebook_path = example_directory / "torch_compile_comparison.ipynb"
+notebook_on_disk = json.loads(notebook_path.read_text())
+notebook_code = "\n\n".join("".join(cell["source"]) for cell in notebook_on_disk["cells"]
+                            if cell["cell_type"] == "code")
+environment["notebook_code_sha256"] = hashlib.sha256(notebook_code.encode()).hexdigest()
+input_hashes_before = [hashlib.sha256(data.numpy().tobytes()).hexdigest() for data in inputs]
+save_json("setup.json", {"settings": settings, "environment": environment, "compiler": compiler,
+                         "backend": initial_backend, "initial_cache": initial_cache,
+                         "compiler_cache": str(compiler_cache), "input_sha256": input_hashes_before})
+print("Environment:", sys.executable)
+print("CPU:", environment["cpu"])
+print("Compiler:", compiler["version"].splitlines()[0])
+print("Actual backend:", initial_backend)
+print("Private compiler cache:", compiler_cache)
+
+
+comparison.checked_backend_settings()
+torch.manual_seed(settings["conversion_seed"])
+baseline, preprocessing = experiment.load_baseline(device, allow_download=False)
+baseline_fingerprint = experiment.model_fingerprint(baseline)
+models = {"dense": baseline}
+reports = {}
+layers_by_variant = {}
+
+for name, fraction in (("fraction_0.75", 0.75), ("fraction_0.50", 0.50)):
+    layers = {
+        "layer4.0.conv2": {
+            "factorization": "Tucker", "rank": fraction, "fixed_rank_modes": "spatial",
+        },
+        "layer4.1.conv2": {
+            "factorization": "Tucker", "rank": fraction, "fixed_rank_modes": "spatial",
+        },
+        "fc": {
+            "factorization": "BlockTT", "rank": fraction,
+            "in_tensorized_features": (8, 8, 8), "out_tensorized_features": (10, 10, 10),
+        },
+    }
+    torch.manual_seed(settings["conversion_seed"])
+    models[name], reports[name] = compress_model(baseline, layers, implementation="factorized")
+    models[name].eval()
+    layers_by_variant[name] = layers
+    assert experiment.model_fingerprint(baseline) == baseline_fingerprint
+    print(name, "actual ranks:", [layer["actual_rank"] for layer in reports[name]["replacements"]])
+
+assert all(not module.training for model in models.values() for module in model.modules())
+model_fingerprints_before = {name: experiment.model_fingerprint(model) for name, model in models.items()}
+model_ids = {name: id(model) for name, model in models.items()}
+save_json("compression_reports.json", reports)
+
+
+capture = {}
+for name, model in models.items():
+    comparison.checked_backend_settings()
+    with comparison.diagnostic_log(diagnostic_directory / f"{name}_capture.log"):
+        try:
+            capture[name] = comparison.explain_capture(model, timing_input)
+        except Exception:
+            capture[name] = {"error": traceback.format_exc()}
+    print(name, "capture graphs:", capture[name].get("graph_count"),
+          "graph breaks:", capture[name].get("graph_break_count"),
+          "diagnostic failed:", "error" in capture[name])
+assert {name: experiment.model_fingerprint(model) for name, model in models.items()} == model_fingerprints_before
+save_json("capture_diagnostics.json", capture)
+
+
+compiled_models = {}
+first_use = {}
+for name, model in models.items():
+    comparison.checked_backend_settings()
+    before_cache = comparison.cache_inventory(compiler_cache)
+    before = comparison.compiler_snapshot()
+    record = {"cache_before": before_cache, "compiler_before": before}
+    first_started = None
+    with comparison.diagnostic_log(diagnostic_directory / f"{name}_compile.log"):
+        try:
+            setup_started = time.perf_counter()
+            compiled = torch.compile(model, backend="inductor", mode="default")
+            record["wrapper_setup_seconds"] = time.perf_counter() - setup_started
+            assert compiled._orig_mod is model
+            assert all(left is right for left, right in zip(model.parameters(), compiled.parameters()))
+            with torch.inference_mode():
+                first_started = time.perf_counter()
+                first_output = compiled(timing_input)
+                record["first_use_seconds"] = time.perf_counter() - first_started
+            after = comparison.compiler_snapshot()
+            evidence = any(after[key] > before[key] for key in
+                           ("generated_kernels", "inductor_cache_hits", "inductor_cache_misses"))
+            record["inductor_activity_observed"] = evidence
+            if not evidence:
+                raise RuntimeError("Forward succeeded but no Inductor activity was observed; inspect diagnostics.")
+            record["status"] = "compiled"
+            record["error"] = None
+            compiled_models[name] = compiled
+        except Exception:
+            record["status"] = "unavailable"
+            record["error"] = traceback.format_exc()
+            if first_started is not None and "first_use_seconds" not in record:
+                record["failed_first_use_seconds"] = time.perf_counter() - first_started
+    record["compiler_after"] = comparison.compiler_snapshot()
+    record["compiler_changes"] = comparison.compiler_changes(before, record["compiler_after"])
+    record["counters_after"] = {category: dict(values) for category, values in comparison.counters.items()}
+    record["cache_after"] = comparison.cache_inventory(compiler_cache)
+    first_use[name] = record
+    print(name, record["status"], "first-use seconds:", record.get("first_use_seconds"),
+          "compiler activity:", record["compiler_changes"])
+save_json("first_use.json", first_use)
+
+
+agreement = {}
+preparation = {}
+for name, model in models.items():
+    compiled = compiled_models.get(name)
+    if compiled is None:
+        agreement[name] = {"status": "unavailable", "reason": first_use[name]["error"]}
+        continue
+    comparison.checked_backend_settings()
+    before = comparison.compiler_snapshot()
+    with comparison.diagnostic_log(diagnostic_directory / f"{name}_verification.log"):
+        try:
+            checks = comparison.compare_outputs(model, compiled, inputs,
+                                                 rtol=settings["rtol"], atol=settings["atol"])
+            agreement[name] = {"status": "passed" if all(check["passed"] for check in checks) else "failed",
+                               "checks": checks}
+            if agreement[name]["status"] != "passed":
+                del compiled_models[name]
+            else:
+                with torch.inference_mode():
+                    for _ in range(settings["warmup"]):
+                        model(timing_input)
+                        compiled(timing_input)
+        except Exception:
+            agreement[name] = {"status": "failed", "error": traceback.format_exc()}
+            del compiled_models[name]
+    after = comparison.compiler_snapshot()
+    preparation[name] = {"compiler_before": before, "compiler_after": after,
+                         "compiler_changes": comparison.compiler_changes(before, after)}
+show_table(["Model", "Input seed", "Maximum absolute difference", "Passed"],
+           [[name, settings["input_seeds"][check["input_index"]],
+             f"{check['max_absolute_difference']:.9g}", check["passed"]]
+            for name, result in agreement.items() for check in result.get("checks", [])])
+save_json("output_agreement.json", agreement)
+
+
+repeat_checks = {}
+for name, compiled in compiled_models.items():
+    before = comparison.compiler_snapshot()
+    with comparison.diagnostic_log(diagnostic_directory / f"{name}_repeat.log"):
+        with torch.inference_mode():
+            for _ in range(3):
+                compiled(timing_input)
+    after = comparison.compiler_snapshot()
+    repeat_checks[name] = {"compiler_before": before, "compiler_after": after,
+                           "compiler_changes": comparison.compiler_changes(before, after)}
+    print(name, "repeated-call compiler changes:", repeat_checks[name]["compiler_changes"])
+assert {name: experiment.model_fingerprint(model) for name, model in models.items()} == model_fingerprints_before
+save_json("preparation.json", {"correctness_and_warmup": preparation, "repeated_calls": repeat_checks})
+show_table(["Model", "Capture graphs", "Graph breaks", "First-use seconds", "Agreement", "Ready for timing"],
+           [[name, capture[name].get("graph_count", "unavailable"),
+             capture[name].get("graph_break_count", "unavailable"),
+             first_use[name].get("first_use_seconds", "unavailable"),
+             agreement[name]["status"], name in compiled_models] for name in models])
+
+
+blocks = comparison.measure_rounds(models, compiled_models, timing_input,
+                                   rounds=settings["rounds"], warmup=settings["warmup"], repeats=settings["repeats"])
+rows = comparison.paired_results(blocks)
+model_fingerprints_after = {name: experiment.model_fingerprint(model) for name, model in models.items()}
+input_hashes_after = [hashlib.sha256(data.numpy().tobytes()).hexdigest() for data in inputs]
+assert model_fingerprints_after == model_fingerprints_before
+assert input_hashes_after == input_hashes_before
+assert {name: id(model) for name, model in models.items()} == model_ids
+assert comparison.checked_backend_settings() == initial_backend
+save_json("timing_blocks.json", blocks)
+print("Invalid timing blocks:", [block["block"] for block in blocks if not block["valid_after_compilation"]])
+print("All model parameters, buffers, and inputs remained unchanged.")
+
+
+def latency_text(row, condition):
+    if row[f"{condition}_status"] != "ok":
+        return row[f"{condition}_status"]
+    return (f"{row[f'{condition}_median_ms']:.3f} "
+            f"[{row[f'{condition}_p25_ms']:.3f}, {row[f'{condition}_p75_ms']:.3f}]")
+
+def ratio_text(value):
+    return "unavailable" if value is None else f"{value:.3f}×"
+
+show_table(["Round", "Model", "First", "Eager ms [p25, p75]", "Compiled ms [p25, p75]",
+            "Eager / compiled", "Compiled / compiled dense"],
+           [[row["round"], row["model"], row["first_condition"], latency_text(row, "eager"),
+             latency_text(row, "compiled"), ratio_text(row["speedup"]),
+             ratio_text(row["compiled_vs_dense_latency_ratio"])] for row in rows])
+print("All latencies are milliseconds per batch of one.")
+
+
+labels = {"dense": "Dense", "fraction_0.75": "Target 0.75", "fraction_0.50": "Target 0.50"}
+figure, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=True, constrained_layout=True)
+for axis, name in zip(axes, models):
+    selected = sorted((row for row in rows if row["model"] == name), key=lambda row: row["round"])
+    for condition, marker in (("eager", "o"), ("compiled", "s")):
+        values = [row[f"{condition}_median_ms"] for row in selected]
+        if any(value is not None for value in values):
+            axis.plot([row["round"] for row in selected], values, marker=marker, label=condition.title())
+    axis.set_title(labels[name])
+    axis.set_xlabel("Round")
+    axis.set_xticks(range(1, settings["rounds"] + 1))
+    axis.set_ylim(bottom=0)
+    axis.grid(alpha=0.2)
+    axis.legend()
+axes[0].set_ylabel("Median milliseconds per batch of one")
+plt.show()
+
+for name in models:
+    ratios = [row["speedup"] for row in rows if row["model"] == name and row["speedup"] is not None]
+    if ratios:
+        print(f"{name}: median of {len(ratios)} per-round ratios {statistics.median(ratios):.3f}×; "
+              f"range {min(ratios):.3f}–{max(ratios):.3f}×")
+    else:
+        print(name, "no valid compiled comparison")
+
+
+from torchvision.models import ResNet18_Weights
+weights = ResNet18_Weights.IMAGENET1K_V1
+weight_file = Path(torch.hub.get_dir()) / "checkpoints" / weights.url.rsplit("/", 1)[-1]
+configuration = {
+    "purpose": "Synthetic-input eager versus Inductor inference; no task-accuracy or runtime-memory measurement",
+    "settings": settings, "environment": environment, "compiler": compiler,
+    "weights": {"identifier": "ResNet18_Weights.IMAGENET1K_V1", "url": weights.url,
+                "sha256": experiment.file_sha256(weight_file)},
+    "layers": layers_by_variant, "implementation": "factorized",
+    "input_shape": list(timing_input.shape), "timing_units": "milliseconds per batch of one",
+    "backend_before": initial_backend, "backend_after": comparison.checked_backend_settings(),
+    "model_fingerprints_before": model_fingerprints_before, "model_fingerprints_after": model_fingerprints_after,
+    "input_hashes_before": input_hashes_before, "input_hashes_after": input_hashes_after,
+    "compiler_cache": {"path": str(compiler_cache), "initial": initial_cache,
+                       "final": comparison.cache_inventory(compiler_cache),
+                       "previous_environment_value": previous_compiler_cache_setting,
+                       "note": "New private directory; no shared caches cleared. Not a claim of completely cold startup."},
+    "compiler_snapshot_after_timing": comparison.compiler_snapshot(),
+    "supported_compiled_models": list(compiled_models),
+    "summary_method": "Median of per-round ratios; no pooling or fastest-round selection",
+    "completed_utc": datetime.now(timezone.utc).isoformat(),
+}
+save_json("configuration.json", configuration)
+with (output_directory / "results.csv").open("w", newline="") as stream:
+    writer = csv.DictWriter(stream, fieldnames=list(rows[0]), lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: f"{value:.6f}" if isinstance(value, float) else value for key, value in row.items()})
+figure.savefig(output_directory / "comparison.png", dpi=160, bbox_inches="tight")
+print("Saved this comparison to:", output_directory)

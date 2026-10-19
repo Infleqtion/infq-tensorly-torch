@@ -1,0 +1,12 @@
+{
+  "reason": "Correct shared y-axis limits so all saved medians are visible; complete interpretation from actual results.",
+  "measurements_repeated": false,
+  "changed_code_cell_index": 20,
+  "measurement_code_sha256": "f973c86fbb364a809dc6d1c501956500b49dcf7c4c702b841c97ebce8b158858",
+  "current_notebook_code_sha256": "9d25c0cbac5458db59f6c984070108346fb3d65cd17fc4551400f90973ccc9e4",
+  "original_plot_sha256": "d91cdf896f65546413b6df615f38b3ba1737dbab433e641288c1b7c411bdd61b",
+  "current_plot_sha256": "402d2bbad5e5e9de1b21e08bd30fd7c7f2c56515f54ccd409b12569406533dbd",
+  "plot_data_checked": true,
+  "all_24_median_points_visible": true,
+  "completed_utc": "2026-10-19T15:53:44.561743+00:00"
+}

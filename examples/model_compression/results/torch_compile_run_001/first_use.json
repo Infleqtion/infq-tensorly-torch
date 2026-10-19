@@ -1,0 +1,785 @@
+{
+  "dense": {
+    "cache_before": {
+      "files": 0,
+      "bytes": 0,
+      "shared_libraries": 0,
+      "python_sources": []
+    },
+    "compiler_before": {
+      "frames_started": 61,
+      "unique_graphs": 27,
+      "inductor_cache_hits": 0,
+      "inductor_cache_misses": 0,
+      "generated_kernels": 0,
+      "guard_failures": 0
+    },
+    "wrapper_setup_seconds": 0.44048904000010225,
+    "first_use_seconds": 6.15569454999968,
+    "inductor_activity_observed": true,
+    "status": "compiled",
+    "error": null,
+    "compiler_after": {
+      "frames_started": 62,
+      "unique_graphs": 28,
+      "inductor_cache_hits": 0,
+      "inductor_cache_misses": 1,
+      "generated_kernels": 39,
+      "guard_failures": 0
+    },
+    "compiler_changes": {
+      "frames_started": 1,
+      "unique_graphs": 1,
+      "inductor_cache_misses": 1,
+      "generated_kernels": 39
+    },
+    "counters_after": {
+      "frames": {
+        "total": 62,
+        "ok": 52
+      },
+      "inductor": {
+        "pattern_matcher_count": 1,
+        "pattern_matcher_nodes": 1,
+        "fxgraph_cache_miss": 1,
+        "extern_calls": 21
+      },
+      "inline_call": {
+        "call_method UnspecializedNNModuleVariable(FactorList) __next__ [] {}": 14,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 8
+      },
+      "stats": {
+        "calls_captured": 346,
+        "unique_graphs": 28
+      },
+      "unimplemented": {
+        "generator": 8,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 1
+      },
+      "graph_break": {
+        "call_method UnspecializedNNModuleVariable(FactorList) __next__ [] {}": 16,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 8
+      },
+      "aot_autograd": {
+        "total": 1,
+        "ok": 1
+      }
+    },
+    "cache_after": {
+      "files": 48,
+      "bytes": 1070202,
+      "shared_libraries": 15,
+      "python_sources": [
+        {
+          "path": "3j/c3jiti36i3qqfdwyds4j5d4nginx6ider3jv7xjv62rqfthg6tdc.py",
+          "sha256": "618e87ae29ac95bd16a7ec657face99f6731900ff3744add7c3526957f0e6113",
+          "external_calls": [
+            "addmm",
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        }
+      ]
+    }
+  },
+  "fraction_0.75": {
+    "cache_before": {
+      "files": 48,
+      "bytes": 1070202,
+      "shared_libraries": 15,
+      "python_sources": [
+        {
+          "path": "3j/c3jiti36i3qqfdwyds4j5d4nginx6ider3jv7xjv62rqfthg6tdc.py",
+          "sha256": "618e87ae29ac95bd16a7ec657face99f6731900ff3744add7c3526957f0e6113",
+          "external_calls": [
+            "addmm",
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        }
+      ]
+    },
+    "compiler_before": {
+      "frames_started": 62,
+      "unique_graphs": 28,
+      "inductor_cache_hits": 0,
+      "inductor_cache_misses": 1,
+      "generated_kernels": 39,
+      "guard_failures": 0
+    },
+    "wrapper_setup_seconds": 0.0004030359996249899,
+    "first_use_seconds": 23.249194670999714,
+    "inductor_activity_observed": true,
+    "status": "compiled",
+    "error": null,
+    "compiler_after": {
+      "frames_started": 94,
+      "unique_graphs": 40,
+      "inductor_cache_hits": 0,
+      "inductor_cache_misses": 13,
+      "generated_kernels": 92,
+      "guard_failures": 6
+    },
+    "compiler_changes": {
+      "frames_started": 32,
+      "unique_graphs": 12,
+      "inductor_cache_misses": 12,
+      "generated_kernels": 53,
+      "guard_failures": 6
+    },
+    "counters_after": {
+      "frames": {
+        "total": 94,
+        "ok": 78
+      },
+      "inductor": {
+        "pattern_matcher_count": 22,
+        "pattern_matcher_nodes": 22,
+        "fxgraph_cache_miss": 13,
+        "extern_calls": 47
+      },
+      "inline_call": {
+        "call_method UnspecializedNNModuleVariable(FactorList) __next__ [] {}": 21,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 12
+      },
+      "stats": {
+        "calls_captured": 450,
+        "unique_graphs": 40
+      },
+      "unimplemented": {
+        "generator": 12,
+        "Backend compiler failed with a fake tensor exception at \n  File \"/home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression/tltorch/factorized_layers/factorized_convolution.py\", line 193, in forward\n    return self.forward_fun(x, self.weight(), bias=self.bias, stride=self.stride.tolist(),\nAdding a graph break.": 1,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 1
+      },
+      "graph_break": {
+        "call_method UnspecializedNNModuleVariable(FactorList) __next__ [] {}": 24,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 12
+      },
+      "aot_autograd": {
+        "total": 14,
+        "ok": 13,
+        "not_ok": 1
+      }
+    },
+    "cache_after": {
+      "files": 126,
+      "bytes": 2425622,
+      "shared_libraries": 33,
+      "python_sources": [
+        {
+          "path": "2f/c2fguwc7duhr2oerox3bajg6tui6jiesnkgpflgfjg2isoqiww4g.py",
+          "sha256": "36e27886d66362ae201f7b4f81a630dd7a0d81d59a83f483097d9b2b8090823a",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "34/c34pib7v4ykskhyzu4cvmiywawfoj3vs2wiygebdtpt4ij3pm2me.py",
+          "sha256": "b30ddbae17b578dba44d1cdd514147814750d48570f0cc0838508f97e5b21cc6",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "3j/c3jiti36i3qqfdwyds4j5d4nginx6ider3jv7xjv62rqfthg6tdc.py",
+          "sha256": "618e87ae29ac95bd16a7ec657face99f6731900ff3744add7c3526957f0e6113",
+          "external_calls": [
+            "addmm",
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "4o/c4obqbuz432lhigov2l5dexi24uofl673tyijfplegiovjumt6ef.py",
+          "sha256": "47811c6fea058dafd74951540d623498a9185a4b6cc0bd74937c7df247722e1d",
+          "external_calls": [
+            "bmm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "er/certdtpprnvferc2om6ggvtlgltvclzh3ssske4wwrqtel367fxc.py",
+          "sha256": "b18c1eace21e07ffecf8eb86340692de4a6d91723c1dab66cad420563145cc98",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "jb/cjbu7e7mwt4d422vhsyzch5hck7l6wybjeas3ug4u77dkmwk6tvn.py",
+          "sha256": "bd43792e392131749d26462eb0f4b3d2d5d07ca241f0390ee5b464bc25292b79",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "jd/cjdndcvuwiyojtpuix4n2zbwa6vpju6t6scx5tuq5snuq2ue733h.py",
+          "sha256": "9639a9e13f74a33d77e8311fd8dddb4c9ca1575ead481ce6af6b00ed84ff06c2",
+          "external_calls": [
+            "mm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "ji/cji3hpa6quvaamt2zm2xgutmn6z3axoyzqpszryzjynobuyrrhe4.py",
+          "sha256": "d9c36f1996df4e0d3910672985fd11b1de9942e701277eee7cea501bf09d2511",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "m2/cm2prwvx6xg467pfr3yc3wtkdebodpblrobynebpd6g7aa62awjc.py",
+          "sha256": "d553575bc19bfa1104f83e1ef04259550eed573ab895d8c9eed348ff444af78b",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "vd/cvdu6luaxpi56co53khczjberyeil2cw3p7s3lo4zxz4j6vsykkm.py",
+          "sha256": "30c7ef31bd0a663b0d19cf52c3e6c6bf05f069c155a5969f746dd2d843b8ade8",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "wj/cwjsdde7m35yi4rqpv4wgplaamx4foorfvjbm6hj3p2ioso5ns76.py",
+          "sha256": "cbc19c562dcc2e98a52abba697735f048127dce0453024b31676096043bebea2",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "z7/cz7lrpqhhld6qlvhxe6xmbxhmiks44lzedug7ny5eu7wiljnqc53.py",
+          "sha256": "7621cbe45066fd51f462476a8d46fe5bb60c8196df63dcf0955ee8cb07214cf9",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "zg/czgoyyjk6x4krtrsck7n3yefxkl77j4k5zx7q4rthpoh5hj6uju2.py",
+          "sha256": "fbaa3c33671733bf469f71a8c4ed64a0a9f1ff0240c7772cb32649ca3c63ed2e",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        }
+      ]
+    }
+  },
+  "fraction_0.50": {
+    "cache_before": {
+      "files": 126,
+      "bytes": 2425622,
+      "shared_libraries": 33,
+      "python_sources": [
+        {
+          "path": "2f/c2fguwc7duhr2oerox3bajg6tui6jiesnkgpflgfjg2isoqiww4g.py",
+          "sha256": "36e27886d66362ae201f7b4f81a630dd7a0d81d59a83f483097d9b2b8090823a",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "34/c34pib7v4ykskhyzu4cvmiywawfoj3vs2wiygebdtpt4ij3pm2me.py",
+          "sha256": "b30ddbae17b578dba44d1cdd514147814750d48570f0cc0838508f97e5b21cc6",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "3j/c3jiti36i3qqfdwyds4j5d4nginx6ider3jv7xjv62rqfthg6tdc.py",
+          "sha256": "618e87ae29ac95bd16a7ec657face99f6731900ff3744add7c3526957f0e6113",
+          "external_calls": [
+            "addmm",
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "4o/c4obqbuz432lhigov2l5dexi24uofl673tyijfplegiovjumt6ef.py",
+          "sha256": "47811c6fea058dafd74951540d623498a9185a4b6cc0bd74937c7df247722e1d",
+          "external_calls": [
+            "bmm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "er/certdtpprnvferc2om6ggvtlgltvclzh3ssske4wwrqtel367fxc.py",
+          "sha256": "b18c1eace21e07ffecf8eb86340692de4a6d91723c1dab66cad420563145cc98",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "jb/cjbu7e7mwt4d422vhsyzch5hck7l6wybjeas3ug4u77dkmwk6tvn.py",
+          "sha256": "bd43792e392131749d26462eb0f4b3d2d5d07ca241f0390ee5b464bc25292b79",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "jd/cjdndcvuwiyojtpuix4n2zbwa6vpju6t6scx5tuq5snuq2ue733h.py",
+          "sha256": "9639a9e13f74a33d77e8311fd8dddb4c9ca1575ead481ce6af6b00ed84ff06c2",
+          "external_calls": [
+            "mm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "ji/cji3hpa6quvaamt2zm2xgutmn6z3axoyzqpszryzjynobuyrrhe4.py",
+          "sha256": "d9c36f1996df4e0d3910672985fd11b1de9942e701277eee7cea501bf09d2511",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "m2/cm2prwvx6xg467pfr3yc3wtkdebodpblrobynebpd6g7aa62awjc.py",
+          "sha256": "d553575bc19bfa1104f83e1ef04259550eed573ab895d8c9eed348ff444af78b",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "vd/cvdu6luaxpi56co53khczjberyeil2cw3p7s3lo4zxz4j6vsykkm.py",
+          "sha256": "30c7ef31bd0a663b0d19cf52c3e6c6bf05f069c155a5969f746dd2d843b8ade8",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "wj/cwjsdde7m35yi4rqpv4wgplaamx4foorfvjbm6hj3p2ioso5ns76.py",
+          "sha256": "cbc19c562dcc2e98a52abba697735f048127dce0453024b31676096043bebea2",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "z7/cz7lrpqhhld6qlvhxe6xmbxhmiks44lzedug7ny5eu7wiljnqc53.py",
+          "sha256": "7621cbe45066fd51f462476a8d46fe5bb60c8196df63dcf0955ee8cb07214cf9",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "zg/czgoyyjk6x4krtrsck7n3yefxkl77j4k5zx7q4rthpoh5hj6uju2.py",
+          "sha256": "fbaa3c33671733bf469f71a8c4ed64a0a9f1ff0240c7772cb32649ca3c63ed2e",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        }
+      ]
+    },
+    "compiler_before": {
+      "frames_started": 94,
+      "unique_graphs": 40,
+      "inductor_cache_hits": 0,
+      "inductor_cache_misses": 13,
+      "generated_kernels": 92,
+      "guard_failures": 6
+    },
+    "wrapper_setup_seconds": 0.0003359789998285123,
+    "first_use_seconds": 6.319110212000851,
+    "inductor_activity_observed": true,
+    "status": "compiled",
+    "error": null,
+    "compiler_after": {
+      "frames_started": 98,
+      "unique_graphs": 43,
+      "inductor_cache_hits": 0,
+      "inductor_cache_misses": 16,
+      "generated_kernels": 98,
+      "guard_failures": 10
+    },
+    "compiler_changes": {
+      "frames_started": 4,
+      "unique_graphs": 3,
+      "inductor_cache_misses": 3,
+      "generated_kernels": 6,
+      "guard_failures": 4
+    },
+    "counters_after": {
+      "frames": {
+        "total": 98,
+        "ok": 82
+      },
+      "inductor": {
+        "pattern_matcher_count": 30,
+        "pattern_matcher_nodes": 30,
+        "fxgraph_cache_miss": 16,
+        "extern_calls": 52
+      },
+      "inline_call": {
+        "call_method UnspecializedNNModuleVariable(FactorList) __next__ [] {}": 22,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 12
+      },
+      "stats": {
+        "calls_captured": 474,
+        "unique_graphs": 43
+      },
+      "unimplemented": {
+        "generator": 12,
+        "Backend compiler failed with a fake tensor exception at \n  File \"/home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression/tltorch/factorized_layers/factorized_convolution.py\", line 193, in forward\n    return self.forward_fun(x, self.weight(), bias=self.bias, stride=self.stride.tolist(),\nAdding a graph break.": 1,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 1
+      },
+      "graph_break": {
+        "call_method UnspecializedNNModuleVariable(FactorList) __next__ [] {}": 26,
+        "call_method ListVariable(length=2) extend [LazyVariableTracker()] {}": 12
+      },
+      "aot_autograd": {
+        "total": 17,
+        "ok": 16,
+        "not_ok": 1
+      }
+    },
+    "cache_after": {
+      "files": 147,
+      "bytes": 2733870,
+      "shared_libraries": 38,
+      "python_sources": [
+        {
+          "path": "2f/c2fguwc7duhr2oerox3bajg6tui6jiesnkgpflgfjg2isoqiww4g.py",
+          "sha256": "36e27886d66362ae201f7b4f81a630dd7a0d81d59a83f483097d9b2b8090823a",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "34/c34pib7v4ykskhyzu4cvmiywawfoj3vs2wiygebdtpt4ij3pm2me.py",
+          "sha256": "b30ddbae17b578dba44d1cdd514147814750d48570f0cc0838508f97e5b21cc6",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "3j/c3jiti36i3qqfdwyds4j5d4nginx6ider3jv7xjv62rqfthg6tdc.py",
+          "sha256": "618e87ae29ac95bd16a7ec657face99f6731900ff3744add7c3526957f0e6113",
+          "external_calls": [
+            "addmm",
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "4o/c4obqbuz432lhigov2l5dexi24uofl673tyijfplegiovjumt6ef.py",
+          "sha256": "47811c6fea058dafd74951540d623498a9185a4b6cc0bd74937c7df247722e1d",
+          "external_calls": [
+            "bmm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "5m/c5mqsgygasyqmsskpvecdacqwnosgjac7g62gd4yb3xaxm46rkvc.py",
+          "sha256": "0457621cb01913508d50e377e2e9fbeaee968e0b0d015c1f8ba2e7315405c419",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "er/certdtpprnvferc2om6ggvtlgltvclzh3ssske4wwrqtel367fxc.py",
+          "sha256": "b18c1eace21e07ffecf8eb86340692de4a6d91723c1dab66cad420563145cc98",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "jb/cjbu7e7mwt4d422vhsyzch5hck7l6wybjeas3ug4u77dkmwk6tvn.py",
+          "sha256": "bd43792e392131749d26462eb0f4b3d2d5d07ca241f0390ee5b464bc25292b79",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "jd/cjdndcvuwiyojtpuix4n2zbwa6vpju6t6scx5tuq5snuq2ue733h.py",
+          "sha256": "9639a9e13f74a33d77e8311fd8dddb4c9ca1575ead481ce6af6b00ed84ff06c2",
+          "external_calls": [
+            "mm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "ji/cji3hpa6quvaamt2zm2xgutmn6z3axoyzqpszryzjynobuyrrhe4.py",
+          "sha256": "d9c36f1996df4e0d3910672985fd11b1de9942e701277eee7cea501bf09d2511",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "kl/cklkhvrwkgqe3a5dch4vaaf5hhak7rsusayd3tbinkgd44rkjhav.py",
+          "sha256": "bd53821f8c80a8e491fbe3de8f954f447f32d7aa6f6fd6050f5351209aa0e9bf",
+          "external_calls": [
+            "mm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "m2/cm2prwvx6xg467pfr3yc3wtkdebodpblrobynebpd6g7aa62awjc.py",
+          "sha256": "d553575bc19bfa1104f83e1ef04259550eed573ab895d8c9eed348ff444af78b",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "qw/cqw3hhkx5tfv7nhjjt5pwiaz5rxo65odetjxnmpyyk2l4hulxujf.py",
+          "sha256": "ae400cba5c4a1f7689cec75592bca60cca48aaa9389dfcbbcc8fe30a8442f5c0",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "vd/cvdu6luaxpi56co53khczjberyeil2cw3p7s3lo4zxz4j6vsykkm.py",
+          "sha256": "30c7ef31bd0a663b0d19cf52c3e6c6bf05f069c155a5969f746dd2d843b8ade8",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "wj/cwjsdde7m35yi4rqpv4wgplaamx4foorfvjbm6hj3p2ioso5ns76.py",
+          "sha256": "cbc19c562dcc2e98a52abba697735f048127dce0453024b31676096043bebea2",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "z7/cz7lrpqhhld6qlvhxe6xmbxhmiks44lzedug7ny5eu7wiljnqc53.py",
+          "sha256": "7621cbe45066fd51f462476a8d46fe5bb60c8196df63dcf0955ee8cb07214cf9",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "zg/czgoyyjk6x4krtrsck7n3yefxkl77j4k5zx7q4rthpoh5hj6uju2.py",
+          "sha256": "fbaa3c33671733bf469f71a8c4ed64a0a9f1ff0240c7772cb32649ca3c63ed2e",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        }
+      ]
+    }
+  }
+}

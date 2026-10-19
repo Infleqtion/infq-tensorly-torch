@@ -1,0 +1,542 @@
+{
+  "purpose": "Synthetic-input eager versus Inductor inference; no task-accuracy or runtime-memory measurement",
+  "settings": {
+    "device": "cpu",
+    "dtype": "float32",
+    "threads": 4,
+    "interop_threads": 1,
+    "conversion_seed": 2026,
+    "input_seeds": [
+      2027,
+      2028,
+      2029
+    ],
+    "batch_size": 1,
+    "rounds": 4,
+    "warmup": 20,
+    "repeats": 100,
+    "rtol": 0.0001,
+    "atol": 1e-05,
+    "compiler_backend": "inductor",
+    "compiler_mode": "default"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "packages": {
+      "ipykernel": "7.3.0",
+      "jupyter_client": "8.10.0",
+      "six": "1.17.0",
+      "pexpect": "4.9.0",
+      "pure_eval": "0.2.4",
+      "psutil": "7.2.2",
+      "nest-asyncio2": "1.7.4",
+      "tornado": "6.5.10",
+      "numpy": "2.5.2",
+      "setuptools": "78.1.0",
+      "torchvision": "0.20.1+cpu",
+      "referencing": "0.37.0",
+      "scipy": "1.17.1",
+      "matplotlib-inline": "0.2.2",
+      "kiwisolver": "1.5.1",
+      "jedi": "0.20.1",
+      "ptyprocess": "0.7.0",
+      "prompt_toolkit": "3.0.53",
+      "jsonschema-specifications": "2025.9.1",
+      "pyzmq": "27.2.0",
+      "platformdirs": "4.13.0",
+      "sympy": "1.13.1",
+      "typing_extensions": "4.16.0",
+      "wcwidth": "0.9.2",
+      "matplotlib": "3.10.8",
+      "jupyter_core": "5.9.1",
+      "networkx": "3.6.1",
+      "mpmath": "1.3.0",
+      "debugpy": "1.8.22",
+      "rpds-py": "2026.9.1",
+      "Pygments": "2.21.0",
+      "Jinja2": "3.1.6",
+      "iniconfig": "2.3.1",
+      "fonttools": "4.67.0",
+      "tensorly": "0.9.0",
+      "contourpy": "1.4.0",
+      "ipython_pygments_lexers": "1.1.1",
+      "nbformat": "5.11.1",
+      "fsspec": "2026.7.0",
+      "cycler": "0.12.1",
+      "ipython": "9.17.1",
+      "parso": "0.8.7",
+      "pyparsing": "3.3.3",
+      "pluggy": "1.7.0",
+      "torch": "2.5.1+cpu",
+      "filelock": "3.32.3",
+      "fastjsonschema": "2.22.2",
+      "pip": "24.0",
+      "MarkupSafe": "3.0.3",
+      "stack-data": "0.6.3",
+      "asttokens": "3.0.2",
+      "executing": "2.3.0",
+      "pytest": "9.1.1",
+      "comm": "0.2.3",
+      "attrs": "26.1.0",
+      "nbclient": "0.11.0",
+      "jsonschema": "4.26.0",
+      "pillow": "12.3.0",
+      "traitlets": "5.16.1",
+      "packaging": "26.3",
+      "python-dateutil": "2.9.0.post0"
+    },
+    "tltorch_version": "0.5.0",
+    "tltorch_path": "/home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression/tltorch/__init__.py",
+    "platform": "Linux-6.17.0-1033-oem-x86_64-with-glibc2.39",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285H",
+    "cpu_count": 16,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "cuda_available": false,
+    "cuda_version": null,
+    "cuda_devices": [],
+    "threads": 4,
+    "interop_threads": 1,
+    "backend": {
+      "deterministic_algorithms": true,
+      "matmul_precision": "highest",
+      "cuda_matmul_tf32": false,
+      "cudnn_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "mkldnn_enabled": true,
+      "cublas_workspace_config": ":4096:8",
+      "omp_num_threads": null,
+      "mkl_num_threads": null
+    },
+    "repository_revision": "da2df26205971b06f3d06fc63b492e05a8404482",
+    "working_tree_dirty": true,
+    "experiment_sha256": "f4067715e24e01ec991a56967b6dc545e016322f0e7df668e57bf41562a6a41a",
+    "started_utc": "2026-10-19T15:48:34.070852+00:00",
+    "python_executable": "/home/rafael_magaldi/.cache/tltorch-model-compression/venv/bin/python",
+    "working_tree_status": "?? examples/model_compression/README.md\n?? examples/model_compression/experiment.py\n?? examples/model_compression/model_compression.ipynb\n?? examples/model_compression/opt_einsum_comparison.ipynb\n?? examples/model_compression/opt_einsum_comparison.py\n?? examples/model_compression/requirements-opt-einsum.txt\n?? examples/model_compression/requirements.txt\n?? examples/model_compression/results/cpu_1000/compression_reports.json\n?? examples/model_compression/results/cpu_1000/configuration.json\n?? examples/model_compression/results/cpu_1000/latency_samples.json\n?? examples/model_compression/results/cpu_1000/measurements.json\n?? examples/model_compression/results/cpu_1000/presentation.json\n?? examples/model_compression/results/cpu_1000/results.csv\n?? examples/model_compression/results/cpu_1000/selected_examples.json\n?? examples/model_compression/results/cpu_1000/validation_runs.json\n?? examples/model_compression/results/notebook_run_001/comparison.png\n?? examples/model_compression/results/notebook_run_001/compression_reports.json\n?? examples/model_compression/results/notebook_run_001/configuration.json\n?? examples/model_compression/results/notebook_run_001/latency_samples.json\n?? examples/model_compression/results/notebook_run_001/measurements.json\n?? examples/model_compression/results/notebook_run_001/results.csv\n?? examples/model_compression/results/notebook_run_001/selected_examples.json\n?? examples/model_compression/results/opt_einsum_run_001/comparison.png\n?? examples/model_compression/results/opt_einsum_run_001/compression_reports.json\n?? examples/model_compression/results/opt_einsum_run_001/configuration.json\n?? examples/model_compression/results/opt_einsum_run_001/optimizer_use.json\n?? examples/model_compression/results/opt_einsum_run_001/output_agreement.json\n?? examples/model_compression/results/opt_einsum_run_001/results.csv\n?? examples/model_compression/results/opt_einsum_run_001/timing_blocks.json\n?? examples/model_compression/results/opt_einsum_run_001/validation.json\n?? examples/model_compression/results/timing_followup/round_1.json\n?? examples/model_compression/results/timing_followup/round_2.json\n?? examples/model_compression/results/timing_followup/round_3.json\n?? examples/model_compression/tests/test_experiment.py\n?? examples/model_compression/tests/test_opt_einsum_comparison.py\n?? examples/model_compression/tests/test_torch_compile_comparison.py\n?? examples/model_compression/timing_followup.py\n?? examples/model_compression/torch_compile_comparison.ipynb\n?? examples/model_compression/torch_compile_comparison.py\n",
+    "helper_sha256": {
+      "experiment.py": "f4067715e24e01ec991a56967b6dc545e016322f0e7df668e57bf41562a6a41a",
+      "torch_compile_comparison.py": "00d266a01032521170a65feeb0e7d40d04a2ea753512c84f9ea16f9c8c903940",
+      "opt_einsum_comparison.py": "30a7cc56f17262da929121763c0be0a3d07751136ae4a53ff9340b86bc72b711"
+    },
+    "notebook_code_sha256": "f973c86fbb364a809dc6d1c501956500b49dcf7c4c702b841c97ebce8b158858"
+  },
+  "compiler": {
+    "command": "g++",
+    "path": "/usr/bin/g++",
+    "version": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+    "compile_threads": 16,
+    "fx_graph_cache": true,
+    "suppress_errors": false,
+    "dynamo_cache_size_limit": 8
+  },
+  "weights": {
+    "identifier": "ResNet18_Weights.IMAGENET1K_V1",
+    "url": "https://download.pytorch.org/models/resnet18-f37072fd.pth",
+    "sha256": "f37072fd47e89c5e827621c5baffa7500819f7896bbacec160b1a16c560e07ec"
+  },
+  "layers": {
+    "fraction_0.75": {
+      "layer4.0.conv2": {
+        "factorization": "Tucker",
+        "rank": 0.75,
+        "fixed_rank_modes": "spatial"
+      },
+      "layer4.1.conv2": {
+        "factorization": "Tucker",
+        "rank": 0.75,
+        "fixed_rank_modes": "spatial"
+      },
+      "fc": {
+        "factorization": "BlockTT",
+        "rank": 0.75,
+        "in_tensorized_features": [
+          8,
+          8,
+          8
+        ],
+        "out_tensorized_features": [
+          10,
+          10,
+          10
+        ]
+      }
+    },
+    "fraction_0.50": {
+      "layer4.0.conv2": {
+        "factorization": "Tucker",
+        "rank": 0.5,
+        "fixed_rank_modes": "spatial"
+      },
+      "layer4.1.conv2": {
+        "factorization": "Tucker",
+        "rank": 0.5,
+        "fixed_rank_modes": "spatial"
+      },
+      "fc": {
+        "factorization": "BlockTT",
+        "rank": 0.5,
+        "in_tensorized_features": [
+          8,
+          8,
+          8
+        ],
+        "out_tensorized_features": [
+          10,
+          10,
+          10
+        ]
+      }
+    }
+  },
+  "implementation": "factorized",
+  "input_shape": [
+    1,
+    3,
+    224,
+    224
+  ],
+  "timing_units": "milliseconds per batch of one",
+  "backend_before": {
+    "available": false,
+    "enabled": false,
+    "strategy": null,
+    "tensorly_backend": "pytorch",
+    "tensorly_tenalg_backend": "core",
+    "tensorly_default_einsum": true,
+    "tensorly_plugin_inactive": true,
+    "tensorly_plugin_cache_entries": 0,
+    "threads": 4,
+    "interop_threads": 1,
+    "matmul_precision": "highest",
+    "deterministic_algorithms": true,
+    "mkldnn_enabled": true,
+    "autocast_enabled": false
+  },
+  "backend_after": {
+    "available": false,
+    "enabled": false,
+    "strategy": null,
+    "tensorly_backend": "pytorch",
+    "tensorly_tenalg_backend": "core",
+    "tensorly_default_einsum": true,
+    "tensorly_plugin_inactive": true,
+    "tensorly_plugin_cache_entries": 0,
+    "threads": 4,
+    "interop_threads": 1,
+    "matmul_precision": "highest",
+    "deterministic_algorithms": true,
+    "mkldnn_enabled": true,
+    "autocast_enabled": false
+  },
+  "model_fingerprints_before": {
+    "dense": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e",
+    "fraction_0.75": "ea9f8c2917fab26a7c4135b6336eee947bcc138f823ad6a123c0236dc93f0ecc",
+    "fraction_0.50": "b899915706310f65da692bd1996df02046d0fddff1d9b9a8601599d3b5bd0053"
+  },
+  "model_fingerprints_after": {
+    "dense": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e",
+    "fraction_0.75": "ea9f8c2917fab26a7c4135b6336eee947bcc138f823ad6a123c0236dc93f0ecc",
+    "fraction_0.50": "b899915706310f65da692bd1996df02046d0fddff1d9b9a8601599d3b5bd0053"
+  },
+  "input_hashes_before": [
+    "70c2aad1221b9c761fa202c6862b23a51ec0d8c2c237bee202e09390cdba578d",
+    "d279704b0862be679202d4c4706d2a23b3569b0fe771f1f576b126825a5829e7",
+    "f128a8c0ddf6899fb59c8d9290edb7e6b2f20a317c0b6bce903a2dd51937eae5"
+  ],
+  "input_hashes_after": [
+    "70c2aad1221b9c761fa202c6862b23a51ec0d8c2c237bee202e09390cdba578d",
+    "d279704b0862be679202d4c4706d2a23b3569b0fe771f1f576b126825a5829e7",
+    "f128a8c0ddf6899fb59c8d9290edb7e6b2f20a317c0b6bce903a2dd51937eae5"
+  ],
+  "compiler_cache": {
+    "path": "/home/rafael_magaldi/.cache/tltorch-model-compression/torch-compile/inductor-6p5sjmn6",
+    "initial": {
+      "files": 0,
+      "bytes": 0,
+      "shared_libraries": 0,
+      "python_sources": []
+    },
+    "final": {
+      "files": 171,
+      "bytes": 3217252,
+      "shared_libraries": 44,
+      "python_sources": [
+        {
+          "path": "2f/c2fguwc7duhr2oerox3bajg6tui6jiesnkgpflgfjg2isoqiww4g.py",
+          "sha256": "36e27886d66362ae201f7b4f81a630dd7a0d81d59a83f483097d9b2b8090823a",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "34/c34pib7v4ykskhyzu4cvmiywawfoj3vs2wiygebdtpt4ij3pm2me.py",
+          "sha256": "b30ddbae17b578dba44d1cdd514147814750d48570f0cc0838508f97e5b21cc6",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "3j/c3jiti36i3qqfdwyds4j5d4nginx6ider3jv7xjv62rqfthg6tdc.py",
+          "sha256": "618e87ae29ac95bd16a7ec657face99f6731900ff3744add7c3526957f0e6113",
+          "external_calls": [
+            "addmm",
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "4o/c4obqbuz432lhigov2l5dexi24uofl673tyijfplegiovjumt6ef.py",
+          "sha256": "47811c6fea058dafd74951540d623498a9185a4b6cc0bd74937c7df247722e1d",
+          "external_calls": [
+            "bmm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "5m/c5mqsgygasyqmsskpvecdacqwnosgjac7g62gd4yb3xaxm46rkvc.py",
+          "sha256": "0457621cb01913508d50e377e2e9fbeaee968e0b0d015c1f8ba2e7315405c419",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "cs/ccswp2hsnpcv2fmvbxi6v2mqxg2rqzehvoninb4y2oje5eqtscqg.py",
+          "sha256": "2f7bc10e43cef70e808a6816ca876bfcf580cc0c8acc9c7f97caebc185b45b35",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "er/certdtpprnvferc2om6ggvtlgltvclzh3ssske4wwrqtel367fxc.py",
+          "sha256": "b18c1eace21e07ffecf8eb86340692de4a6d91723c1dab66cad420563145cc98",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "jb/cjbu7e7mwt4d422vhsyzch5hck7l6wybjeas3ug4u77dkmwk6tvn.py",
+          "sha256": "bd43792e392131749d26462eb0f4b3d2d5d07ca241f0390ee5b464bc25292b79",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "jd/cjdndcvuwiyojtpuix4n2zbwa6vpju6t6scx5tuq5snuq2ue733h.py",
+          "sha256": "9639a9e13f74a33d77e8311fd8dddb4c9ca1575ead481ce6af6b00ed84ff06c2",
+          "external_calls": [
+            "mm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "ji/cji3hpa6quvaamt2zm2xgutmn6z3axoyzqpszryzjynobuyrrhe4.py",
+          "sha256": "d9c36f1996df4e0d3910672985fd11b1de9942e701277eee7cea501bf09d2511",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "kl/cklkhvrwkgqe3a5dch4vaaf5hhak7rsusayd3tbinkgd44rkjhav.py",
+          "sha256": "bd53821f8c80a8e491fbe3de8f954f447f32d7aa6f6fd6050f5351209aa0e9bf",
+          "external_calls": [
+            "mm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "lx/clxnldr35u6rac5rlonaz2w6o57wj4lpkr2dclvhk5fnsqayrcs6.py",
+          "sha256": "4b3cc1414f4a490c9932e253aa0ef205517bb6ea7bf1f53c5bfd511cffd515eb",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "m2/cm2prwvx6xg467pfr3yc3wtkdebodpblrobynebpd6g7aa62awjc.py",
+          "sha256": "d553575bc19bfa1104f83e1ef04259550eed573ab895d8c9eed348ff444af78b",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "qw/cqw3hhkx5tfv7nhjjt5pwiaz5rxo65odetjxnmpyyk2l4hulxujf.py",
+          "sha256": "ae400cba5c4a1f7689cec75592bca60cca48aaa9389dfcbbcc8fe30a8442f5c0",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "vd/cvdu6luaxpi56co53khczjberyeil2cw3p7s3lo4zxz4j6vsykkm.py",
+          "sha256": "30c7ef31bd0a663b0d19cf52c3e6c6bf05f069c155a5969f746dd2d843b8ade8",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "wj/cwjsdde7m35yi4rqpv4wgplaamx4foorfvjbm6hj3p2ioso5ns76.py",
+          "sha256": "cbc19c562dcc2e98a52abba697735f048127dce0453024b31676096043bebea2",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "yx/cyxbcraudlxqpa77g7lnd3yxpr2fbivew4h7upbeexxr4hspnxsm.py",
+          "sha256": "ab616613dcc7ba5a7c01324b5d1dd0f6176fa6a26cff292fb16fc5218d79ecbe",
+          "external_calls": [
+            "addmm"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "z7/cz7lrpqhhld6qlvhxe6xmbxhmiks44lzedug7ny5eu7wiljnqc53.py",
+          "sha256": "7621cbe45066fd51f462476a8d46fe5bb60c8196df63dcf0955ee8cb07214cf9",
+          "external_calls": [],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        },
+        {
+          "path": "zg/czgoyyjk6x4krtrsck7n3yefxkl77j4k5zx7q4rthpoh5hj6uju2.py",
+          "sha256": "fbaa3c33671733bf469f71a8c4ed64a0a9f1ff0240c7772cb32649ca3c63ed2e",
+          "external_calls": [
+            "convolution"
+          ],
+          "torch_operator_calls": [
+            "torch.ops._quantized",
+            "torch.ops.aten",
+            "torch.ops.inductor",
+            "torch.ops.inductor._alloc_from_pool"
+          ]
+        }
+      ]
+    },
+    "previous_environment_value": null,
+    "note": "New private directory; no shared caches cleared. Not a claim of completely cold startup."
+  },
+  "compiler_snapshot_after_timing": {
+    "frames_started": 101,
+    "unique_graphs": 46,
+    "inductor_cache_hits": 0,
+    "inductor_cache_misses": 19,
+    "generated_kernels": 113,
+    "guard_failures": 16
+  },
+  "supported_compiled_models": [
+    "dense",
+    "fraction_0.75",
+    "fraction_0.50"
+  ],
+  "summary_method": "Median of per-round ratios; no pooling or fastest-round selection",
+  "completed_utc": "2026-10-19T15:50:24.541739+00:00"
+}

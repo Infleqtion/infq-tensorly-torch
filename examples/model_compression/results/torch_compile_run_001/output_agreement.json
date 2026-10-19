@@ -1,0 +1,98 @@
+{
+  "dense": {
+    "status": "passed",
+    "checks": [
+      {
+        "input_index": 0,
+        "max_absolute_difference": 2.6226043701171875e-06,
+        "reference_max_absolute_value": 6.736689567565918,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      },
+      {
+        "input_index": 1,
+        "max_absolute_difference": 3.337860107421875e-06,
+        "reference_max_absolute_value": 6.446582317352295,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      },
+      {
+        "input_index": 2,
+        "max_absolute_difference": 2.9802322387695312e-06,
+        "reference_max_absolute_value": 7.080653667449951,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      }
+    ]
+  },
+  "fraction_0.75": {
+    "status": "passed",
+    "checks": [
+      {
+        "input_index": 0,
+        "max_absolute_difference": 3.814697265625e-06,
+        "reference_max_absolute_value": 5.55095100402832,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      },
+      {
+        "input_index": 1,
+        "max_absolute_difference": 4.291534423828125e-06,
+        "reference_max_absolute_value": 5.640299320220947,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      },
+      {
+        "input_index": 2,
+        "max_absolute_difference": 3.0994415283203125e-06,
+        "reference_max_absolute_value": 5.9690165519714355,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      }
+    ]
+  },
+  "fraction_0.50": {
+    "status": "passed",
+    "checks": [
+      {
+        "input_index": 0,
+        "max_absolute_difference": 2.7418136596679688e-06,
+        "reference_max_absolute_value": 4.486123561859131,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      },
+      {
+        "input_index": 1,
+        "max_absolute_difference": 2.7418136596679688e-06,
+        "reference_max_absolute_value": 4.708252906799316,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      },
+      {
+        "input_index": 2,
+        "max_absolute_difference": 2.9802322387695312e-06,
+        "reference_max_absolute_value": 5.399841785430908,
+        "rtol": 0.0001,
+        "atol": 1e-05,
+        "passed": true,
+        "error": null
+      }
+    ]
+  }
+}

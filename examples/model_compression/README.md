@@ -91,7 +91,7 @@ if available, or omit it and retain the saved per-image hashes as provenance.
 To reuse weights stored elsewhere, export `TORCH_HOME="/path/to/torch-cache"`
 before running setup or starting Jupyter. Set it to the cache root containing
 `hub/checkpoints/resnet18-f37072fd.pth`, not to the checkpoint file itself. The
-reusable commands preserve an existing `TORCH_HOME`, and both notebooks
+reusable commands preserve an existing `TORCH_HOME`, and all three notebooks
 respect it. Cached weights are reused; a missing cache raises an error unless
 the command-line experiment explicitly receives `--allow-weight-download`.
 
@@ -469,3 +469,126 @@ batch-one experiment. Path-search cost is included, but was not isolated from
 the cost of executing the chosen path. These measurements do not establish
 performance on other hardware or new task accuracy. The executed notebook shows
 every round and its quartiles; no prior result was replaced.
+
+## Optional torch.compile comparison
+
+`torch_compile_comparison.ipynb` compares ordinary eager execution with
+`torch.compile(model, backend="inductor", mode="default")` for the dense model
+and the same two factorized copies. It runs the comparison using synthetic inputs,
+with opt_einsum explicitly disabled and TensorLy's plugin inactive. It measures
+whole-model execution only, with no dataset download or task-accuracy evaluation.
+
+This run reuses the original environment unchanged: Python 3.12.3, PyTorch
+2.5.1+cpu, torchvision 0.20.1+cpu, TensorLy 0.9.0, NumPy 2.5.2, and SciPy 1.17.1.
+The available C++ compiler is `/usr/bin/g++`, version 13.3.0. A small Inductor
+smoke check confirmed that the installed tools generate and run a CPU kernel;
+no additional Python or system packages were needed. The shared MPO environment
+and the separate opt_einsum environment remain unchanged.
+
+Use the existing **TensorLy model compression** kernel. From the repository root:
+
+```bash
+EXAMPLE_CACHE="$HOME/.cache/tltorch-model-compression"
+EXAMPLE_PY="$EXAMPLE_CACHE/venv/bin/python"
+mkdir -p "$EXAMPLE_CACHE/torch-compile/ipython" \
+  "$EXAMPLE_CACHE/torch-compile/jupyter-runtime" "$EXAMPLE_CACHE/torch-compile/matplotlib"
+export PYTHONDONTWRITEBYTECODE=1
+export TORCH_HOME="${TORCH_HOME:-$EXAMPLE_CACHE/torch}"
+export JUPYTER_PATH="$EXAMPLE_CACHE/venv/share/jupyter"
+export IPYTHONDIR="$EXAMPLE_CACHE/torch-compile/ipython"
+export JUPYTER_RUNTIME_DIR="$EXAMPLE_CACHE/torch-compile/jupyter-runtime"
+export MPLCONFIGDIR="$EXAMPLE_CACHE/torch-compile/matplotlib"
+"$EXAMPLE_PY" -B - <<'PYNOTEBOOK'
+from pathlib import Path
+import nbformat
+from nbclient import NotebookClient
+path = Path('examples/model_compression/torch_compile_comparison.ipynb')
+notebook = nbformat.read(path, as_version=4)
+try:
+    NotebookClient(notebook, timeout=900, kernel_name='tltorch-model-compression',
+                   resources={'metadata': {'path': str(path.parent.resolve())}}).execute()
+finally:
+    nbformat.write(notebook, path)
+PYNOTEBOOK
+```
+
+Before another execution, change `output_directory` to an unused name and save
+the notebook. The delivered run uses `results/torch_compile_run_001/`; existing
+runs cannot be overwritten. Each execution allocates a private Inductor cache
+under `$EXAMPLE_CACHE/torch-compile/`, without clearing shared caches. First-use
+latency includes the first forward and compilation, and is not claimed to be a
+completely cold compiler measurement. Later models may reuse earlier artifacts.
+
+The notebook records capture graphs and graph breaks separately from evidence of
+actual Inductor execution. Detailed diagnostics use installed PyTorch 2.5 APIs,
+including private diagnostic counters; compatibility with other versions is not
+assumed. No compiler errors are suppressed. Correctness uses three seeded inputs
+and fixed `rtol=1e-4, atol=1e-5`. Failed comparisons or unsupported models are
+reported without substituted eager timings.
+
+All models are prepared before four paired timing rounds. CPU float32, four
+threads, one inter-op thread, evaluation/inference mode, batch one, 20 warm-ups,
+and 100 samples per block match the prior CPU setup. Condition order alternates
+and model order rotates. Compiler-counter changes invalidate a block for
+post-compilation speedup summaries while preserving its samples. Tables show
+each round's medians and quartiles; the plot retains all rounds.
+
+Saved files include `setup.json`, `configuration.json`, `compression_reports.json`,
+`capture_diagnostics.json`, `first_use.json`, `output_agreement.json`,
+`preparation.json`, `timing_blocks.json`, `results.csv`, `comparison.png`, and
+`diagnostics/` logs. Environment records include package/compiler versions, actual
+settings, revision/status, code hashes, and model/input fingerprints. Cache
+binaries remain outside the repository. Compilation changes no stored weights or
+ranks; model storage reports do not count compiler code, workspace, or peak memory.
+
+Offline checks exercise reporting, paired scheduling, and detection of compiler
+activity using simulated measurements. They do not compile models or download data:
+
+```bash
+OMP_NUM_THREADS=1 "$EXAMPLE_PY" -B -m pytest -q -p no:cacheprovider \
+  examples/model_compression/tests/test_torch_compile_comparison.py \
+  examples/model_compression/tests/test_experiment.py
+```
+
+All 11 code cells completed in a fresh kernel. All nine output checks passed,
+with maximum differences of 3.34e-6 (dense), 4.29e-6 (target 0.75), and 2.98e-6
+(target 0.50). Model/input fingerprints stayed unchanged. The capture diagnostic
+reported one graph / zero breaks for dense and 13 graphs / 12 breaks for each
+compressed model. Actual Inductor logs also show a recoverable stride-`.tolist()`
+fake-tensor failure and ordinary Python execution around factor iteration. Tensor
+regions still compiled; no library changes or error suppression were used.
+
+First-use latency was 6.156 s, 23.249 s, and 6.319 s in model order. Later models
+could reuse cache artifacts, and additional compilation occurred during dense
+verification. These are not cold or total preparation costs. The repeated-call
+probe and all 24 timing blocks had no compiler-counter changes.
+
+Dense and target 0.50 improved in all four paired comparisons: median per-round
+speedup ratios were 1.107× and 1.056×. Target 0.75 had no reliable benefit, with
+ratios from 0.533× to 1.010×. Absolute latencies shifted substantially within the
+process, including the dense control. Every compiled compressed model was slower
+than compiled dense in the same round. Keep compilation optional; these results
+do not justify enabling it universally or claiming stable deployment ratios.
+
+A shared-axis plotting limit was corrected from saved samples after execution;
+no benchmarks were repeated. `measurement_code.txt` preserves the original code
+matching the run's notebook-code hash. `presentation.json` records the corrected
+notebook-code and plot hashes. The executed notebook explains every round and the
+remaining timing uncertainty, without replacing any earlier experiment.
+
+`validation.json` records the completed checks and exact execution command.
+Because this repository ignores `*.log`, `compiler_logs.zip` also contains all
+12 diagnostic logs, verified byte-for-byte against `diagnostics/`. This lossless
+review archive was packaged after execution; raw logs retain the compiler's
+original text. To package a new run from its saved logs, choose its new directory:
+
+```bash
+"$EXAMPLE_PY" -B - <<'PYLOGS'
+from pathlib import Path
+import zipfile
+saved = Path('examples/model_compression/results/torch_compile_run_001')
+with zipfile.ZipFile(saved / 'compiler_logs.zip', 'x', compression=zipfile.ZIP_DEFLATED) as archive:
+    for path in sorted((saved / 'diagnostics').glob('*.log')):
+        archive.write(path, arcname=str(path.relative_to(saved)))
+PYLOGS
+```
