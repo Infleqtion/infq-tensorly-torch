@@ -21,6 +21,8 @@ import time
 from urllib.parse import urlparse
 
 import torch
+import torch.backends.opt_einsum as torch_opt_einsum
+from tensorly import plugins
 from torch.utils.data import DataLoader, Dataset
 
 from tltorch import compress_model
@@ -154,6 +156,9 @@ def configure_runtime(device, threads=4):
     torch.set_num_threads(threads)
     if torch.get_num_interop_threads() != 1:
         torch.set_num_interop_threads(1)
+    # Installing an optional optimizer must not change baseline contractions.
+    torch_opt_einsum.enabled = False
+    plugins.use_default_einsum()
     torch.set_float32_matmul_precision("highest")
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -324,7 +329,7 @@ def environment_info():
 
     root = Path(__file__).resolve().parents[2]
     packages = {}
-    for name in ("torch", "torchvision", "tensorly", "numpy", "scipy", "Pillow", "nbformat", "nbclient", "ipykernel"):
+    for name in ("torch", "torchvision", "tensorly", "numpy", "scipy", "Pillow", "nbformat", "nbclient", "ipykernel", "opt-einsum"):
         try:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
@@ -339,7 +344,11 @@ def environment_info():
             "cuda_available": torch.cuda.is_available(), "cuda_version": torch.version.cuda,
             "cuda_devices": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
             "threads": torch.get_num_threads(), "interop_threads": torch.get_num_interop_threads(),
-            "backend": {"deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "backend": {"opt_einsum": {"available": torch_opt_einsum.is_available(),
+                                       "enabled": torch_opt_einsum.enabled,
+                                       "strategy": torch_opt_einsum.strategy},
+                        "tensorly_plugin_inactive": plugins.PREVIOUS_EINSUM is None,
+                        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
                         "matmul_precision": torch.get_float32_matmul_precision(),
                         "cuda_matmul_tf32": torch.backends.cuda.matmul.allow_tf32,
                         "cudnn_tf32": torch.backends.cudnn.allow_tf32,

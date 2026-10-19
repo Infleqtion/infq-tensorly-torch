@@ -75,3 +75,6 @@ target/
 
 #Ipython Notebook
 .ipynb_checkpoints
+
+# Local uv environment
+.venv/

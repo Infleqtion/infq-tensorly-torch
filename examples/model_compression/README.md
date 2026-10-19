@@ -8,6 +8,15 @@ The example uses torchvision `ResNet18_Weights.IMAGENET1K_V1` and its own prepro
 resize to 256 with bilinear interpolation, center crop to 224, and ImageNet
 normalization. See the [weight documentation](https://docs.pytorch.org/vision/0.20/models/generated/torchvision.models.resnet18.html).
 
+For the current uv environment, follow the [repository setup](../../README.rst#using-uv-for-this-checkout-and-its-notebooks).
+The main notebook and CLI now explicitly disable PyTorch's opt_einsum integration
+in `configure_runtime`, even if the optional package is installed. Newly generated
+`configuration.json` files record the actual flags in `environment.backend.opt_einsum`
+and the inactive TensorLy plugin in `environment.backend.tensorly_plugin_inactive`.
+The dedicated opt_einsum comparison still tests both conditions; the compile
+comparison keeps it disabled. Saved results and the historical setup below have
+not been rewritten. The main notebook's saved outputs precede these setup changes.
+
 ## Setup outside the repository
 
 Run commands from the repository root. Python 3.12 was used. These optional example

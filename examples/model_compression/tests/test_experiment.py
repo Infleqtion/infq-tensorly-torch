@@ -129,3 +129,39 @@ def test_csv_formats_summaries_without_changing_measurements(tmp_path):
                      "parameter_bytes": "41505104", "buffer_bytes": "38560", "flops_total": ""}
     assert row == original
     assert b"\r" not in path.read_bytes()
+
+
+@pytest.mark.parametrize("opt_einsum_installed", [False, True])
+def test_baseline_disables_optional_optimizer_and_records_actual_settings(opt_einsum_installed):
+    if opt_einsum_installed:
+        pytest.importorskip("opt_einsum")
+    # Isolate global thread/backend settings; hide the optional import for the absent case.
+    code = """
+import sys
+if sys.argv[1] == "False":
+    sys.modules["opt_einsum"] = None
+
+import torch
+import torch.backends.opt_einsum as backend
+from tensorly import plugins
+from examples.model_compression import experiment
+
+installed = sys.argv[1] == "True"
+assert backend.is_available() == installed
+if installed:
+    backend.enabled = True
+    plugins.use_opt_einsum()
+
+assert experiment.configure_runtime("cpu", threads=1) == torch.device("cpu")
+assert not backend.enabled
+assert plugins.PREVIOUS_EINSUM is None
+actual = experiment.environment_info()["backend"]
+assert actual["opt_einsum"] == {
+    "available": installed, "enabled": False, "strategy": backend.strategy,
+}
+assert actual["tensorly_plugin_inactive"]
+# A three-operand contraction must still work without the optimizer.
+values = torch.ones(2, 2)
+assert torch.equal(torch.einsum("ij,jk,kl->il", values, values, values), torch.full((2, 2), 4.))
+"""
+    subprocess.run([sys.executable, "-B", "-c", code, str(opt_einsum_installed)], check=True)
