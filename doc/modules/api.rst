@@ -246,3 +246,62 @@ Utility functions
     :template: function.rst
 
     get_tensorized_shape
+
+Model compression
+=================
+
+``tltorch.compress_model`` copies a model and replaces selected trained layers
+using the existing single-layer converters. Linear layers support CP, Tucker,
+and BlockTT; Conv2d layers support CP, Tucker, and TT. Both factorized and
+reconstructed execution are available::
+
+    from tltorch import compress_model
+
+    compressed, report = compress_model(model, {
+        "classifier": {
+            "factorization": "CP",
+            "rank": 8,
+            "in_tensorized_features": (4, 4),
+            "out_tensorized_features": (2, 5),
+            "decomposition_kwargs": {"random_state": 7, "n_iter_max": 100},
+        },
+    })
+
+This example assumes a classifier with 16 inputs and 10 outputs. Omit both
+mode lists to use the existing automatic tensorization. The lists must have
+equal lengths: this scope restriction avoids a known Tucker factorized-forward
+problem, although CP itself handles unequal lengths. Tucker linear rank tuples
+list all output modes, then all input modes. CP requires a scalar rank.
+
+Integer ranks specify sizes; floating-point ranks and ``"same"`` request
+approximate weight-storage targets. They do not guarantee savings. Tucker can
+store more parameters than the original weight for some targets. Use
+``max_parameters`` to enforce a limit on the actual replacement, including bias
+and frozen parameters. The report counts CP coefficients and Tucker cores as
+well as factor matrices.
+
+CP uses random initialization with seed 0, up to 100 fitting iterations, tolerance
+``1e-8``, and ``l2_reg=1e-5``. Random initialization starts a fit to the trained
+weights; it never substitutes unfitted random weights. This wrapper rejects CP
+SVD initialization because the installed TensorLy path can allocate excessive
+temporary tensors. Random initialization avoids that path, but large ranks can
+still be expensive. There are no hidden rank caps or retries.
+
+CP and Tucker accept ``init``, ``n_iter_max``, ``tol``, and ``random_state`` in
+``decomposition_kwargs``; only CP accepts ``l2_reg``. Tucker retains SVD
+initialization, up to 100 iterations, tolerance ``1e-4``, and ``random_state=None`` by
+default, and also supports random initialization. Iteration limits must be
+positive integers; tolerance and regularization must be finite and nonnegative.
+Explicit seeds must be integers from 0 through ``2**32 - 1``. Seeds pass directly
+to TensorLy without changing global NumPy state; Tucker's ``None`` keeps its
+unseeded behavior. Other options, including ``return_errors``, are rejected.
+TT and BlockTT do not accept decomposition controls.
+
+Each replacement report includes its effective ``decomposition_kwargs`` (an
+empty mapping for TT and BlockTT). Shared aliases compare these normalized
+settings, so omitted controls and explicit defaults agree. ``actual_rank`` is
+an integer for CP and a tuple for Tucker, TT, or BlockTT, describing the stored
+representation after fitting, including any rank reduction. Weight approximation
+error does not establish task accuracy.
+
+.. autofunction:: tltorch.compress_model

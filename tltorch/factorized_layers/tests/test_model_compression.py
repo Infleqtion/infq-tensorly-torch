@@ -1,15 +1,18 @@
-"""Model selection and copying tests; layer arithmetic is covered in Step 1."""
+"""Model compression selection, fitting, preservation, and reporting tests."""
 
 from copy import deepcopy
 import json
 import math
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.utils import parametrize
 
 from tltorch import FactorizedConv, FactorizedLinear
+from tltorch.factorized_tensors import factorized_tensors as tensor_decompositions
 from tltorch.utils import model_compression
 from tltorch.utils.model_compression import compress_model
 
@@ -173,7 +176,7 @@ def test_empty_selection_copies_parameters_buffers_and_modes():
     ({"head": {"rank": 1}}, "head.*factorization"),
     ({"head": {"factorization": "BlockTT"}}, "head.*rank"),
     ({"head": []}, "head.*settings must be a dictionary"),
-    ({"head": {"factorization": "Tucker", "rank": 1}}, "head.*only.*BlockTT"),
+    ({"head": {"factorization": "TT", "rank": 1}}, "head.*only.*BlockTT"),
     ({"features.0": {"factorization": "BlockTT", "rank": 1}}, "features.0.*Tucker.*TT"),
     ({"head": {"factorization": "BlockTT", "rank": 1, "typo": True}}, "head.*typo"),
     ({"head": {"factorization": "BlockTT", "rank": 1, "max_parameters": 0}}, "head.*max_parameters"),
@@ -824,8 +827,9 @@ def test_blocktt_storage_includes_frozen_factors_and_bias_at_exact_cap():
     compressed = {"parameter_count": 16, "parameter_bytes": 128, "buffer_bytes": 0}
     entry, = report["replacements"]
     assert set(entry) == {"name", "aliases", "factorization", "requested_rank", "actual_rank",
-                          "max_parameters", "original", "compressed", "weight_error"}
+                          "max_parameters", "original", "compressed", "weight_error", "decomposition_kwargs"}
     assert entry["max_parameters"] == 16
+    assert entry["decomposition_kwargs"] == {}
     assert entry["original"] == original
     assert entry["compressed"] == compressed
     assert set(entry["weight_error"]) == {"absolute", "relative"}
@@ -1143,3 +1147,299 @@ def test_public_import():
     from tltorch import compress_model as public_compress_model
 
     assert public_compress_model is compress_model
+
+
+def new_factorization_case(kind):
+    """Small layers whose explicit tensor dimensions make storage counts visible."""
+    if kind == "conv-cp":
+        source = nn.Conv2d(3, 4, (3, 2), stride=(2, 1), padding=(1, 2),
+                           dilation=(1, 2), dtype=torch.float64)
+        settings = {"factorization": "CP", "rank": 1}
+    else:
+        source = nn.Linear(6, 8, dtype=torch.float64)
+        settings = {"factorization": "CP" if kind == "linear-cp" else "Tucker",
+                    "rank": 1 if kind == "linear-cp" else (1, 1, 1, 1),
+                    "out_tensorized_features": (2, 4), "in_tensorized_features": (3, 2)}
+    return source, settings
+
+
+@pytest.mark.parametrize("kind", ["linear-cp", "linear-tucker", "conv-cp"])
+@pytest.mark.parametrize("implementation", ["factorized", "reconstructed"])
+def test_new_factorizations_fit_known_weights(kind, implementation):
+    torch.manual_seed(40)
+    source, settings = new_factorization_case(kind)
+    source.eval()
+    source.bias.requires_grad_(False)
+    shape = tuple(source.weight.shape) if kind == "conv-cp" else (2, 4, 3, 2)
+    # An outer product has rank one in every mode, with nonconstant entries.
+    weight = torch.tensor(1., dtype=torch.float64)
+    for size in shape:
+        weight = weight.unsqueeze(-1) * torch.linspace(0.5, 1., size, dtype=torch.float64)
+    with torch.no_grad():
+        source.weight.copy_(weight.reshape_as(source.weight))
+    if settings["factorization"] == "CP":
+        settings["decomposition_kwargs"] = {"l2_reg": 0}  # No regularization shrinkage.
+    before, random_state = state_values(source), rng_states()
+    converted, report = compress_model(source, {"": settings}, implementation=implementation)
+    assert_rng_states(random_state)
+    assert_state_values(source, before)
+    reconstructed = converted.weight.to_tensor() if kind == "conv-cp" else converted.weight.to_matrix()
+    torch.testing.assert_close(reconstructed, source.weight, rtol=1e-7, atol=1e-8)
+    inputs = torch.randn((2, 3, 9, 8) if kind == "conv-cp" else (2, 6), dtype=torch.float64)
+    torch.testing.assert_close(converted(inputs), source(inputs), rtol=1e-7, atol=1e-8)
+    assert report["replacements"][0]["weight_error"]["relative"] < 1e-7
+    assert not converted.training and not converted.bias.requires_grad
+    assert all(p.requires_grad and p.dtype == source.weight.dtype and p.device == source.weight.device
+               for p in converted.weight.parameters())
+    if kind == "conv-cp":
+        assert tuple(converted.stride) == source.stride
+        assert tuple(converted.padding) == source.padding
+        assert tuple(converted.dilation) == source.dilation
+        assert converted.kernel_size == source.kernel_size
+    assert_independent_models(source, converted)
+
+
+@pytest.mark.parametrize("kind", ["linear-cp", "linear-tucker", "conv-cp"])
+@pytest.mark.parametrize("implementation", ["factorized", "reconstructed"])
+def test_new_lossy_factorizations_match_dense_execution_and_train(kind, implementation):
+    torch.manual_seed(41)
+    source, settings = new_factorization_case(kind)
+    source.bias.requires_grad_(False)
+    before = state_values(source)
+    converted, report = compress_model(source, {"": settings}, implementation=implementation)
+    assert report["replacements"][0]["weight_error"]["relative"] > 0.1
+    inputs = torch.randn((2, 3, 9, 8) if kind == "conv-cp" else (2, 6),
+                         dtype=torch.float64, requires_grad=True)
+    reference_inputs = inputs.detach().clone().requires_grad_(True)
+    if kind == "conv-cp":
+        reference = F.conv2d(reference_inputs, converted.weight.to_tensor().detach(), converted.bias.detach(),
+                             source.stride, source.padding, source.dilation)
+    else:
+        reference = F.linear(reference_inputs, converted.weight.to_matrix().detach(), converted.bias.detach())
+    actual = converted(inputs)
+    torch.testing.assert_close(actual, reference, rtol=1e-10, atol=1e-10)
+    actual.square().mean().backward()
+    reference.square().mean().backward()
+    torch.testing.assert_close(inputs.grad, reference_inputs.grad, rtol=1e-10, atol=1e-10)
+    parameters = list(converted.weight.parameters())
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() and torch.count_nonzero(p.grad)
+               for p in parameters)
+    old_parameters = [p.detach().clone() for p in parameters]
+    torch.optim.SGD(converted.parameters(), lr=0.01).step()
+    assert all(not torch.equal(p, old) for p, old in zip(parameters, old_parameters))
+    assert converted.bias.grad is None
+    torch.testing.assert_close(converted.bias, source.bias, rtol=0, atol=0)
+    assert all(p.grad is None for p in source.parameters())
+    assert_state_values(source, before)
+
+
+@pytest.mark.parametrize("kind,count", [("linear-cp", 20), ("linear-tucker", 20), ("conv-cp", 17)])
+def test_new_factorization_storage_and_parameter_caps_include_frozen_weights(kind, count):
+    torch.manual_seed(42)
+    source, settings = new_factorization_case(kind)
+    source.weight.requires_grad_(False)
+    settings["max_parameters"] = count
+    before, random_state = state_values(source), rng_states()
+    converted, report = compress_model(source, {"": settings})
+    entry, = report["replacements"]
+    # Linear: factors 2+4+3+2, one coefficient/core value, and eight biases.
+    # Conv: factors 4+3+3+2, one CP coefficient, and four biases.
+    expected_shapes = [(4, 1), (3, 1), (3, 1), (2, 1)] if kind == "conv-cp" else [
+        (2, 1), (4, 1), (3, 1), (2, 1)]
+    assert [tuple(f.shape) for f in converted.weight.factors] == expected_shapes
+    if kind == "linear-tucker":
+        assert converted.weight.core.shape == (1, 1, 1, 1)
+        assert entry["actual_rank"] == tuple(converted.weight.core.shape)
+    else:
+        assert converted.weight.weights.shape == (1,)
+        assert type(entry["actual_rank"]) is int and entry["actual_rank"] == 1
+    assert entry["compressed"] == {"parameter_count": count, "parameter_bytes": 8 * count, "buffer_bytes": 0}
+    assert report["model"]["compressed"] == report["replaced_layers"]["compressed"] == entry["compressed"]
+    assert all(not p.requires_grad for p in converted.weight.parameters())
+    converted.bias.sum().backward()
+    assert torch.equal(converted.bias.grad, torch.ones_like(converted.bias))
+    assert all(p.grad is None for p in converted.weight.parameters())
+    settings["max_parameters"] = count - 1
+    with pytest.raises(RuntimeError, match=f"Layer ''.*max_parameters.*{count} parameters"):
+        compress_model(source, {"": settings})
+    assert_state_values(source, before)
+    assert_rng_states(random_state)
+    json.dumps(report, allow_nan=False)
+
+
+@pytest.mark.parametrize("rank,expected", [(1, 1), (1.0, 5), ("same", 5)])
+def test_cp_automatic_tensorization_and_rank_meanings(rank, expected):
+    torch.manual_seed(43)
+    source = nn.Linear(8, 8, bias=False)
+    converted, report = compress_model(source, {"": {"factorization": "CP", "rank": rank}})
+    assert converted.in_tensorized_features == converted.out_tensorized_features == (2, 2, 2)
+    # Six factors with two rows: round(64 / 12) = 5 for the full storage target.
+    assert report["replacements"][0]["actual_rank"] == converted.weight.rank == expected
+    assert type(report["replacements"][0]["requested_rank"]) is type(rank)
+    assert converted.bias is None
+
+
+@pytest.mark.parametrize("rank", [1, 0.5, "same", (2, 1, 3, 1), (10, 10, 10, 10)])
+def test_tucker_linear_scalar_targets_and_actual_reduced_ranks(rank):
+    torch.manual_seed(44)
+    source, settings = new_factorization_case("linear-tucker")
+    settings["rank"] = rank
+    if rank == 1:
+        with pytest.warns(RuntimeWarning, match="Using this rank for all modes"):
+            converted, report = compress_model(source, {"": settings})
+    else:
+        converted, report = compress_model(source, {"": settings})
+    actual = tuple(converted.weight.core.shape)
+    assert tuple(f.shape[1] for f in converted.weight.factors) == actual
+    assert report["replacements"][0]["actual_rank"] == tuple(converted.rank) == actual
+    if isinstance(rank, tuple):
+        assert actual == ((2, 4, 3, 2) if rank == (10, 10, 10, 10) else rank)
+
+
+def test_tucker_linear_automatic_tensorization():
+    torch.manual_seed(44)
+    # Automatic tensorization remains the ordinary three-mode default.
+    automatic, _ = compress_model(nn.Linear(8, 8), {"": {"factorization": "Tucker", "rank": 0.5}})
+    assert automatic.in_tensorized_features == automatic.out_tensorized_features == (2, 2, 2)
+
+
+@pytest.mark.parametrize("kind,changes,message", [
+    ("linear-cp", {"rank": (1, 1, 1, 1)}, "CP rank.*sequences"),
+    ("conv-cp", {"rank": [1, 1, 1, 1]}, "CP rank.*sequences"),
+    ("linear-cp", {"rank": 0.001}, "resolves to rank 0"),
+    ("conv-cp", {"rank": 0.001}, "resolves to rank 0"),
+    ("linear-tucker", {"rank": (1, 1)}, "4 entries.*output modes.*input modes"),
+    ("linear-tucker", {"rank": (1, 1, -1, 1)}, "rank must"),
+    ("linear-cp", {"in_tensorized_features": (6,)}, "same number of modes"),
+    ("linear-tucker", {"in_tensorized_features": (6,)}, "same number of modes"),
+    ("conv-cp", {"fixed_rank_modes": "spatial"}, "unsupported.*fixed_rank_modes"),
+    ("conv-cp", {"factorization": "TT", "decomposition_kwargs": {}}, "unsupported.*decomposition_kwargs"),
+    ("linear-cp", {"decomposition_kwargs": []}, "decomposition_kwargs must be a mapping"),
+    ("linear-cp", {"decomposition_kwargs": {"init": "svd"}}, "CP requires init='random'.*temporary"),
+    ("linear-tucker", {"decomposition_kwargs": {"init": "unknown"}}, "Tucker init"),
+    ("linear-cp", {"decomposition_kwargs": {"init": np.array(["random"])}}, "CP requires init='random'"),
+    ("linear-tucker", {"decomposition_kwargs": {"init": ["svd"]}}, "Tucker init"),
+    ("linear-cp", {"decomposition_kwargs": {"return_errors": True}}, "unsupported.*return_errors"),
+    ("linear-tucker", {"decomposition_kwargs": {"return_errors": True}}, "unsupported.*return_errors"),
+    ("linear-tucker", {"decomposition_kwargs": {"l2_reg": 0}}, "unsupported.*l2_reg"),
+    ("linear-cp", {"decomposition_kwargs": {"n_iter_max": 0}}, "n_iter_max.*positive integer"),
+    ("linear-tucker", {"decomposition_kwargs": {"n_iter_max": 1.5}}, "n_iter_max.*positive integer"),
+    ("linear-cp", {"decomposition_kwargs": {"n_iter_max": True}}, "n_iter_max.*positive integer"),
+    ("linear-cp", {"decomposition_kwargs": {"tol": -1}}, "tol.*finite and nonnegative"),
+    ("linear-tucker", {"decomposition_kwargs": {"tol": float("nan")}}, "tol.*finite and nonnegative"),
+    ("linear-cp", {"decomposition_kwargs": {"l2_reg": float("inf")}}, "l2_reg.*finite and nonnegative"),
+    ("linear-cp", {"decomposition_kwargs": {"l2_reg": -1}}, "l2_reg.*finite and nonnegative"),
+    ("linear-cp", {"decomposition_kwargs": {"random_state": None}}, "random_state.*integer"),
+    ("linear-tucker", {"decomposition_kwargs": {"random_state": -1}}, "random_state.*integer"),
+    ("linear-cp", {"decomposition_kwargs": {"random_state": 2**32}}, "random_state.*integer"),
+    ("linear-tucker", {"decomposition_kwargs": {"random_state": True}}, "random_state.*integer"),
+    ("linear-cp", {"decomposition_kwargs": {"random_state": 1.5}}, "random_state.*integer"),
+    ("linear-cp", {"decomposition_kwargs": {"random_state": np.random.RandomState(0)}}, "random-generator"),
+    ("linear-tucker", {"decomposition_kwargs": {"random_state": np.random.default_rng(0)}}, "random-generator"),
+])
+def test_new_factorization_invalid_settings_prevent_conversion(kind, changes, message, monkeypatch):
+    source, settings = new_factorization_case(kind)
+    settings.update(changes)
+    before, random_state = state_values(source), rng_states()
+    calls = forbid_decomposition(monkeypatch)
+    with pytest.raises(ValueError, match="Layer ''.*" + message):
+        compress_model(source, {"": settings})
+    assert calls == []
+    assert_state_values(source, before)
+    assert_rng_states(random_state)
+
+
+@pytest.mark.parametrize("layer_kind", ["linear", "conv"])
+@pytest.mark.parametrize("factorization,defaults", [
+    ("CP", {"init": "random", "n_iter_max": 100, "tol": 1e-8, "random_state": 0, "l2_reg": 1e-5}),
+    ("Tucker", {"init": "svd", "n_iter_max": 100, "tol": 1e-4, "random_state": None}),
+])
+def test_shared_decomposition_defaults_are_compatible_and_reported(layer_kind, factorization, defaults, monkeypatch):
+    torch.manual_seed(45)
+    layer = nn.Linear(8, 8) if layer_kind == "linear" else nn.Conv2d(3, 4, (3, 2))
+    source = nn.ModuleDict({"left": layer, "right": layer})
+    tucker_rank = (1,) * (6 if layer_kind == "linear" else 4)
+    settings = {"factorization": factorization, "rank": 1 if factorization == "CP" else tucker_rank}
+    layers = {"left": settings, "right": {**settings, "decomposition_kwargs": dict(defaults)}}
+    before = deepcopy(layers)
+    original = tensor_decompositions.parafac if factorization == "CP" else tensor_decompositions.tucker
+    calls = []
+
+    def record_fit(tensor, rank, **kwargs):
+        calls.append(kwargs)
+        return original(tensor, rank, **kwargs)
+
+    monkeypatch.setattr(tensor_decompositions, "parafac" if factorization == "CP" else "tucker", record_fit)
+    converted, report = compress_model(source, layers)
+    assert calls == [defaults]
+    assert converted.left is converted.right
+    assert len(report["replacements"]) == 1
+    assert report["replacements"][0]["decomposition_kwargs"] == defaults
+    assert layers == before
+    # The returned report must not provide a mutable reference to caller settings.
+    report["replacements"][0]["decomposition_kwargs"]["tol"] = 2
+    assert layers == before
+    layers["right"]["decomposition_kwargs"]["random_state"] = 7
+    calls = forbid_decomposition(monkeypatch)
+    with pytest.raises(ValueError, match="left.*right.*conflicting settings"):
+        compress_model(source, layers)
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind", ["linear-cp", "linear-tucker", "conv-cp", "conv-tucker"])
+def test_seeded_fits_repeat_without_changing_caller_random_states(kind, monkeypatch):
+    torch.manual_seed(46)
+    source, settings = new_factorization_case("conv-cp" if kind == "conv-tucker" else kind)
+    if kind == "conv-tucker":
+        settings.update(factorization="Tucker", rank=(1, 1, 1, 1))
+    controls = {"init": "random", "n_iter_max": 5, "tol": 0, "random_state": 19}
+    settings["decomposition_kwargs"] = controls
+    original = tensor_decompositions.parafac if settings["factorization"] == "CP" else tensor_decompositions.tucker
+    calls = []
+
+    def record_fit(tensor, rank, **kwargs):
+        calls.append(kwargs)
+        return original(tensor, rank, **kwargs)
+
+    monkeypatch.setattr(tensor_decompositions, "parafac" if settings["factorization"] == "CP" else "tucker", record_fit)
+    global_numpy_state = np.random.get_state()
+    try:
+        fits = []
+        for seed in (47, 48):
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            random_state, numpy_state = rng_states(), np.random.get_state()
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                converted, report = compress_model(source, {"": settings})
+                assert torch.is_autocast_enabled("cpu")
+            fits.append(state_values(converted))
+            assert_rng_states(random_state)
+            assert all(np.array_equal(a, b) for a, b in zip(np.random.get_state(), numpy_state))
+            assert {key: report["replacements"][0]["decomposition_kwargs"][key] for key in controls} == controls
+            assert all(p.dtype == torch.float64 for p in converted.parameters())
+        assert all(torch.equal(fits[0][key], fits[1][key]) for key in fits[0])
+        assert all({key: call[key] for key in controls} == controls for call in calls)
+    finally:
+        np.random.set_state(global_numpy_state)
+
+
+@pytest.mark.parametrize("kind", ["linear-cp", "linear-tucker", "conv-cp"])
+def test_new_decomposition_failure_preserves_context_source_and_rng(kind, monkeypatch):
+    source, settings = new_factorization_case(kind)
+    model = nn.ModuleDict({"selected": source})
+    before, random_state = state_values(model), rng_states()
+    failure = RuntimeError("injected fitting failure")
+
+    def fail(tensor, *args, **kwargs):
+        torch.rand(3)
+        tensor.zero_()
+        raise failure
+
+    monkeypatch.setattr(tensor_decompositions, "parafac" if settings["factorization"] == "CP" else "tucker", fail)
+    result = None
+    with pytest.raises(RuntimeError, match="selected.*injected fitting failure") as error:
+        result = compress_model(model, {"selected": settings})
+    assert result is None
+    assert error.value.__cause__ is failure
+    assert_state_values(model, before)
+    assert_rng_states(random_state)

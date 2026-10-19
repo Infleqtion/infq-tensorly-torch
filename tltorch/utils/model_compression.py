@@ -113,6 +113,46 @@ def _validate_layer(layer):
             raise ValueError("padding must be two nonnegative integers; string padding is not supported")
 
 
+def _normalize_decomposition_kwargs(factorization, settings):
+    """Validate the supported fitting controls and fill in their effective defaults."""
+    if not isinstance(settings, Mapping):
+        raise ValueError("decomposition_kwargs must be a mapping")
+    if factorization == "CP":
+        options = {"init": "random", "n_iter_max": 100, "tol": 1e-8,
+                   "random_state": 0, "l2_reg": 1e-5}
+    else:
+        options = {"init": "svd", "n_iter_max": 100, "tol": 1e-4, "random_state": None}
+    unknown = settings.keys() - options.keys()
+    if unknown:
+        raise ValueError(f"unsupported decomposition_kwargs for {factorization}: "
+                         + ", ".join(sorted(map(repr, unknown))))
+    options.update(settings)
+    init = options["init"]
+    if factorization == "CP" and (not isinstance(init, str) or init != "random"):
+        raise ValueError("CP requires init='random': the installed TensorLy SVD initialization "
+                         "can allocate excessively large temporary tensors")
+    if factorization == "Tucker" and (not isinstance(init, str) or init not in ("svd", "random")):
+        raise ValueError("Tucker init must be 'svd' or 'random'")
+    if not _is_positive_integer(options["n_iter_max"]):
+        raise ValueError("n_iter_max must be a positive integer, excluding booleans")
+    options["n_iter_max"] = int(options["n_iter_max"])
+    for name in ("tol", "l2_reg") if factorization == "CP" else ("tol",):
+        value = options[name]
+        if (not isinstance(value, Real) or isinstance(value, bool)
+                or not math.isfinite(value) or value < 0):
+            raise ValueError(f"{name} must be finite and nonnegative")
+        options[name] = float(value)
+    seed = options["random_state"]
+    if seed is None and factorization == "Tucker":
+        return options  # Preserve Tucker's existing unseeded default.
+    if (not isinstance(seed, Integral) or isinstance(seed, bool)
+            or not 0 <= seed < 2**32):
+        raise ValueError("random_state must be an integer between 0 and 2**32 - 1 "
+                         "(or None for Tucker); random-generator objects are not supported")
+    options["random_state"] = int(seed)
+    return options
+
+
 def _prepare_conversion_options(layer, settings):
     _validate_layer(layer)
     if not isinstance(settings, Mapping):
@@ -122,27 +162,33 @@ def _prepare_conversion_options(layer, settings):
         raise ValueError(f"missing required settings: {', '.join(sorted(missing))}")
     factorization = settings["factorization"]
     if not isinstance(factorization, str):
-        raise ValueError("factorization must be BlockTT for Linear, or Tucker/TT for Conv2d")
+        raise ValueError("factorization must be CP/Tucker/BlockTT for Linear, or CP/Tucker/TT for Conv2d")
 
     factorization = factorization.lower()
     allowed = {"factorization", "rank", "max_parameters"}
     if type(layer) is nn.Linear:
-        if factorization != "blocktt":
-            raise ValueError("nn.Linear supports only factorization='BlockTT'")
-        factorization = "BlockTT"
+        if factorization not in ("cp", "tucker", "blocktt"):
+            raise ValueError("nn.Linear supports only factorization='CP', 'Tucker', or 'BlockTT'")
+        factorization = {"cp": "CP", "tucker": "Tucker", "blocktt": "BlockTT"}[factorization]
         allowed.update(("in_tensorized_features", "out_tensorized_features"))
     else:
-        if factorization not in ("tucker", "tt"):
-            raise ValueError("nn.Conv2d supports only factorization='Tucker' or 'TT'")
-        factorization = "Tucker" if factorization == "tucker" else "TT"
+        if factorization not in ("cp", "tucker", "tt"):
+            raise ValueError("nn.Conv2d supports only factorization='CP', 'Tucker', or 'TT'")
+        factorization = {"cp": "CP", "tucker": "Tucker", "tt": "TT"}[factorization]
         if factorization == "Tucker":
             allowed.add("fixed_rank_modes")
+    if factorization in ("CP", "Tucker"):
+        allowed.add("decomposition_kwargs")
     unknown = settings.keys() - allowed
     if unknown:
         raise ValueError(f"unsupported options for {factorization}: {', '.join(sorted(map(repr, unknown)))}")
 
     rank = _normalize_rank(settings["rank"])
     options = {"factorization": factorization, "rank": rank}
+    if factorization in ("CP", "Tucker"):
+        options["decomposition_kwargs"] = _normalize_decomposition_kwargs(
+            factorization, settings.get("decomposition_kwargs", {}))
+    shape = tuple(layer.weight.shape)
     if type(layer) is nn.Linear:
         has_input = "in_tensorized_features" in settings
         has_output = "out_tensorized_features" in settings
@@ -162,9 +208,23 @@ def _prepare_conversion_options(layer, settings):
         # Resolve defaults so explicit and automatic choices compare by their actual modes.
         options.update(auto_tensorize=False, in_tensorized_features=tuple(input_modes),
                        out_tensorized_features=tuple(output_modes))
-        validate_block_tt_rank((output_modes, input_modes), rank)
+        shape = tuple(output_modes) + tuple(input_modes)
+        if factorization == "BlockTT":
+            validate_block_tt_rank((output_modes, input_modes), rank)
+
+    if factorization == "CP":
+        if isinstance(rank, tuple):
+            raise ValueError("CP rank must be a positive integer, a float storage target, or 'same'; "
+                             "rank sequences are not supported")
+        resolved_rank = tl.cp_tensor.validate_cp_rank(shape, rank)
+        if resolved_rank < 1:
+            raise ValueError(f"CP rank target {rank!r} resolves to rank {resolved_rank}; "
+                             "choose a target that gives at least rank 1")
     elif factorization == "Tucker":
-        if isinstance(rank, tuple) and len(rank) != 4:
+        if isinstance(rank, tuple) and len(rank) != len(shape):
+            if type(layer) is nn.Linear:
+                raise ValueError(f"Tucker linear rank must have {len(shape)} entries: "
+                                 "all output modes followed by all input modes")
             raise ValueError("Tucker rank must have four entries: output, input, height, width")
         fixed_modes = None
         if "fixed_rank_modes" in settings:
@@ -176,9 +236,9 @@ def _prepare_conversion_options(layer, settings):
                                  f"but rank={rank} requests {rank[2:]}")
             fixed_modes = [2, 3]
             options["fixed_rank_modes"] = "spatial"
-        tl.tucker_tensor.validate_tucker_rank(tuple(layer.weight.shape), rank, fixed_modes=fixed_modes)
-    else:
-        shape = kernel_shape_to_factorization_shape("TT", tuple(layer.weight.shape))
+        tl.tucker_tensor.validate_tucker_rank(shape, rank, fixed_modes=fixed_modes)
+    elif factorization == "TT":
+        shape = kernel_shape_to_factorization_shape("TT", shape)
         tl.tt_tensor.validate_tt_rank(shape, rank)
     return options
 
@@ -368,10 +428,39 @@ def compress_model(model, layers, *, implementation="factorized"):
 
     ``layers`` maps exact registered module names to settings; the empty name
     selects the root. Each entry requires ``factorization`` and ``rank``. Linear
-    supports BlockTT, optionally with both ``in_tensorized_features`` and
-    ``out_tensorized_features``. Conv2d supports Tucker or TT; only Tucker accepts
-    ``fixed_rank_modes="spatial"``. ``implementation`` is ``"factorized"`` (default)
-    or ``"reconstructed"`` and controls how replacements execute their forward pass.
+    supports CP, Tucker, or BlockTT, optionally with both ``in_tensorized_features``
+    and ``out_tensorized_features``; omitting them uses the existing automatic
+    tensorization. Both lists must have the same number of modes. This scope
+    restriction avoids an existing Tucker factorized-forward problem with
+    unequal lengths, although CP itself supports unequal lengths. Conv2d supports
+    CP, Tucker, or TT; only Tucker accepts ``fixed_rank_modes="spatial"``.
+    ``implementation`` is ``"factorized"`` (default) or ``"reconstructed"`` and
+    controls how replacements execute their forward pass.
+
+    An integer rank specifies a rank size; a float is an approximate storage target,
+    and ``"same"`` requests a target of 1.0. CP has one rank and rejects sequences
+    and targets resolving below one. Tucker linear rank sequences list all output
+    modes followed by all input modes. Actual ranks can shrink during decomposition.
+    Storage targets can produce more parameters than the dense weight, especially
+    for Tucker; inspect the actual measurements or set ``max_parameters``.
+
+    CP and Tucker accept a ``decomposition_kwargs`` mapping. Supported controls are
+    ``init``, ``n_iter_max`` (positive integer), ``tol`` (finite, nonnegative), and
+    ``random_state`` (integer from 0 through 2**32 - 1). CP also accepts finite,
+    nonnegative ``l2_reg``. CP defaults are ``init="random"``, ``n_iter_max=100``,
+    ``tol=1e-8``, ``random_state=0``, and ``l2_reg=1e-5``. Only random initialization
+    is supported for CP: TensorLy's SVD path can allocate excessive temporary
+    tensors. Random initialization starts fitting the original trained weights;
+    it is never a fallback to unfitted random weights. Large CP ranks can still
+    be expensive. The wrapper does not lower requested ranks, cap them, or retry
+    fitting.
+
+    Tucker keeps defaults ``init="svd"``, ``n_iter_max=100``, ``tol=1e-4``, and
+    ``random_state=None``; it also accepts ``init="random"``. Integer seeds pass
+    directly to decomposition without reseeding global NumPy state. Tucker's None
+    keeps its existing unseeded behavior; choose an integer for reproducible random
+    initialization. Other controls (including ``return_errors``) are rejected.
+    TT and BlockTT do not accept ``decomposition_kwargs``.
 
     The optional ``max_parameters`` must be a positive integer, excluding booleans.
     It caps all stored replacement parameter elements, including bias and frozen
@@ -383,8 +472,10 @@ def compress_model(model, layers, *, implementation="factorized"):
 
     - ``replacements``: one entry per unique converted layer, with ``name``,
       ``aliases``, ``factorization``, ``requested_rank``, ``actual_rank``,
+      ``decomposition_kwargs`` (effective supported controls, or {} for TT/BlockTT),
       ``max_parameters`` (None when omitted), ``original``, ``compressed``, and
-      ``weight_error``.
+      ``weight_error``. CP's ``actual_rank`` is an integer; other factorizations use
+      tuples describing the stored factors or core after decomposition.
     - ``replaced_layers`` and ``model``: each has ``original`` and ``compressed``
       storage measurements. The model totals include unchanged layers.
 
@@ -420,7 +511,9 @@ def compress_model(model, layers, *, implementation="factorized"):
 
     Shared layers are converted once and replaced at every registered path. Selected
     aliases must have compatible settings, including identical caps or all omitting
-    the cap. Weight or bias tensors tied to a different module are rejected.
+    the cap. Omitted decomposition controls and their explicit effective defaults
+    compare equally; caller settings are not mutated. Weight or bias tensors tied
+    to a different module are rejected.
 
     Validate all requests before copying or decomposing. Only the copy is modified;
     no forward passes or model-wide training-mode changes occur. CPU and CUDA RNG
@@ -473,7 +566,9 @@ def compress_model(model, layers, *, implementation="factorized"):
                 "aliases": request["aliases"],
                 "factorization": options["factorization"],
                 "requested_rank": request["requested_rank"],
-                "actual_rank": tuple(int(rank) for rank in replacement.rank),
+                "actual_rank": (int(replacement.rank) if options["factorization"] == "CP"
+                                else tuple(int(rank) for rank in replacement.rank)),
+                "decomposition_kwargs": dict(options.get("decomposition_kwargs", {})),
                 "max_parameters": request["max_parameters"],
                 **measurements,
             })
