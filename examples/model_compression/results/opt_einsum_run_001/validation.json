@@ -1,0 +1,52 @@
+{
+  "code_cells_executed": 10,
+  "timing_blocks": 48,
+  "timing_samples": 4800,
+  "paired_rows": 24,
+  "all_statistics_and_csv_and_notebook_tables_match": true,
+  "compression_reports_match_historical": true,
+  "preexisting_files": 117,
+  "preexisting_files_changed": [
+    "examples/model_compression/README.md"
+  ],
+  "preexisting_readme_content_preserved": true,
+  "tracked_files_and_index_and_head_unchanged": true,
+  "tests": {
+    "passed": 17,
+    "skipped": 0,
+    "warnings": 1
+  },
+  "working_tree_status_after_execution": "?? examples/model_compression/README.md\n?? examples/model_compression/experiment.py\n?? examples/model_compression/model_compression.ipynb\n?? examples/model_compression/opt_einsum_comparison.ipynb\n?? examples/model_compression/opt_einsum_comparison.py\n?? examples/model_compression/requirements-opt-einsum.txt\n?? examples/model_compression/requirements.txt\n?? examples/model_compression/results/cpu_1000/compression_reports.json\n?? examples/model_compression/results/cpu_1000/configuration.json\n?? examples/model_compression/results/cpu_1000/latency_samples.json\n?? examples/model_compression/results/cpu_1000/measurements.json\n?? examples/model_compression/results/cpu_1000/presentation.json\n?? examples/model_compression/results/cpu_1000/results.csv\n?? examples/model_compression/results/cpu_1000/selected_examples.json\n?? examples/model_compression/results/cpu_1000/validation_runs.json\n?? examples/model_compression/results/notebook_run_001/comparison.png\n?? examples/model_compression/results/notebook_run_001/compression_reports.json\n?? examples/model_compression/results/notebook_run_001/configuration.json\n?? examples/model_compression/results/notebook_run_001/latency_samples.json\n?? examples/model_compression/results/notebook_run_001/measurements.json\n?? examples/model_compression/results/notebook_run_001/results.csv\n?? examples/model_compression/results/notebook_run_001/selected_examples.json\n?? examples/model_compression/results/opt_einsum_run_001/comparison.png\n?? examples/model_compression/results/opt_einsum_run_001/compression_reports.json\n?? examples/model_compression/results/opt_einsum_run_001/configuration.json\n?? examples/model_compression/results/opt_einsum_run_001/optimizer_use.json\n?? examples/model_compression/results/opt_einsum_run_001/output_agreement.json\n?? examples/model_compression/results/opt_einsum_run_001/results.csv\n?? examples/model_compression/results/opt_einsum_run_001/timing_blocks.json\n?? examples/model_compression/results/timing_followup/round_1.json\n?? examples/model_compression/results/timing_followup/round_2.json\n?? examples/model_compression/results/timing_followup/round_3.json\n?? examples/model_compression/tests/test_experiment.py\n?? examples/model_compression/tests/test_opt_einsum_comparison.py\n?? examples/model_compression/timing_followup.py\n",
+  "source_and_artifact_sha256": {
+    "examples/model_compression/opt_einsum_comparison.ipynb": "12107057be6bd4e7a44683a510c542649fab716ee0baac31a96e142acfa500bc",
+    "examples/model_compression/opt_einsum_comparison.py": "30a7cc56f17262da929121763c0be0a3d07751136ae4a53ff9340b86bc72b711",
+    "examples/model_compression/requirements-opt-einsum.txt": "cb3ca843bf237d8c2fe08edfc424302c86255694e30c4c86d5fb1d371170cb92",
+    "examples/model_compression/results/opt_einsum_run_001/comparison.png": "5879fd813845e83e6fd8984be71b77a23dcd8ed17e4167728a7c56f6a871cee8",
+    "examples/model_compression/results/opt_einsum_run_001/compression_reports.json": "758d1dbab10ee8b2c9682bec7f2fd2257fee1e92738bdd1c35ac30c80c1b4165",
+    "examples/model_compression/results/opt_einsum_run_001/configuration.json": "de1cff308d5503956707beaecf29d2077ce1f194a37d89aaf2cba98828a1644a",
+    "examples/model_compression/results/opt_einsum_run_001/optimizer_use.json": "265f6f2261a7ed6529772402303836ebe73c2fab3c2aa90ad2b6526c48d7692a",
+    "examples/model_compression/results/opt_einsum_run_001/output_agreement.json": "79bc5970793de8b818df349173dc9e6f4871798b5cc81b369ab61614b2369c53",
+    "examples/model_compression/results/opt_einsum_run_001/results.csv": "8640e67226501347cdb22c3cc56b8738437423ffde5049b021cb09afdd09ecd9",
+    "examples/model_compression/results/opt_einsum_run_001/timing_blocks.json": "f1f201a50dddb1a412d844c9e5f932d83a544263f7aaade5e7080aa2984deac3",
+    "examples/model_compression/tests/test_opt_einsum_comparison.py": "9578c89f300aaf0b8113a3584cd0461c25c0f994b873fb4529aa5816553e2608"
+  },
+  "original_environment": {
+    "packages_unchanged": 61,
+    "opt_einsum_installed": false,
+    "integration_enabled": false
+  },
+  "plot_review": "Embedded and standalone plots inspected; per-round points match recorded speedup ratios.",
+  "notebook_execution": {
+    "kernel": "tltorch-opt-einsum",
+    "fresh_kernel": true,
+    "elapsed_seconds": 78.9,
+    "errors": 0
+  },
+  "review_note": "Post-execution checks; file status and hashes were captured before this validation record was added.",
+  "setup_commands": [
+    "/home/rafael_magaldi/.cache/tltorch-model-compression/venv/bin/python -B -m venv /home/rafael_magaldi/.cache/tltorch-model-compression/venv-opt-einsum",
+    "/home/rafael_magaldi/.cache/tltorch-model-compression/venv-opt-einsum/bin/python -B -m pip install torch==2.5.1+cpu torchvision==0.20.1+cpu --index-url https://download.pytorch.org/whl/cpu",
+    "/home/rafael_magaldi/.cache/tltorch-model-compression/venv-opt-einsum/bin/python -B -m pip install -r examples/model_compression/requirements-opt-einsum.txt --report /tmp/opt-einsum-comparison-bdezs5vr/install.json",
+    "PYTHONDONTWRITEBYTECODE=1 /home/rafael_magaldi/.cache/tltorch-model-compression/venv-opt-einsum/bin/python -B -m ipykernel install --prefix /home/rafael_magaldi/.cache/tltorch-model-compression/venv-opt-einsum --name tltorch-opt-einsum --display-name \"TensorLy opt_einsum comparison\""
+  ]
+}

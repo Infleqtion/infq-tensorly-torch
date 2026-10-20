@@ -298,6 +298,7 @@ class TuckerTensor(FactorizedTensor, name='Tucker'):
 
         self.core = nn.Parameter(core.contiguous())
         self.factors = FactorList([nn.Parameter(f.contiguous()) for f in factors])
+        self.rank = tuple(core.shape)
         return self
 
     @property

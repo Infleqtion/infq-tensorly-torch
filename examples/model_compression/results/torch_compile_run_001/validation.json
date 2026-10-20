@@ -1,0 +1,66 @@
+{
+  "fresh_kernel_code_cells": 11,
+  "timing_blocks": 24,
+  "timing_samples": 2400,
+  "paired_rows": 12,
+  "output_agreement_checks_passed": 9,
+  "timing_blocks_with_compiler_activity": 0,
+  "statistics_csv_and_notebook_tables_match": true,
+  "plot_points_checked": 24,
+  "compression_reports_match_historical": true,
+  "original_environment_packages_unchanged": 61,
+  "preexisting_files_unchanged": 128,
+  "readme_original_text_preserved": true,
+  "tracked_files_index_and_head_unchanged": true,
+  "tests": {
+    "passed": 15,
+    "skipped": 0,
+    "existing_warnings": 1
+  },
+  "measurement_and_presentation_hashes_verified": true,
+  "working_tree_status": "?? examples/model_compression/README.md\n?? examples/model_compression/experiment.py\n?? examples/model_compression/model_compression.ipynb\n?? examples/model_compression/opt_einsum_comparison.ipynb\n?? examples/model_compression/opt_einsum_comparison.py\n?? examples/model_compression/requirements-opt-einsum.txt\n?? examples/model_compression/requirements.txt\n?? examples/model_compression/results/cpu_1000/compression_reports.json\n?? examples/model_compression/results/cpu_1000/configuration.json\n?? examples/model_compression/results/cpu_1000/latency_samples.json\n?? examples/model_compression/results/cpu_1000/measurements.json\n?? examples/model_compression/results/cpu_1000/presentation.json\n?? examples/model_compression/results/cpu_1000/results.csv\n?? examples/model_compression/results/cpu_1000/selected_examples.json\n?? examples/model_compression/results/cpu_1000/validation_runs.json\n?? examples/model_compression/results/notebook_run_001/comparison.png\n?? examples/model_compression/results/notebook_run_001/compression_reports.json\n?? examples/model_compression/results/notebook_run_001/configuration.json\n?? examples/model_compression/results/notebook_run_001/latency_samples.json\n?? examples/model_compression/results/notebook_run_001/measurements.json\n?? examples/model_compression/results/notebook_run_001/results.csv\n?? examples/model_compression/results/notebook_run_001/selected_examples.json\n?? examples/model_compression/results/opt_einsum_run_001/comparison.png\n?? examples/model_compression/results/opt_einsum_run_001/compression_reports.json\n?? examples/model_compression/results/opt_einsum_run_001/configuration.json\n?? examples/model_compression/results/opt_einsum_run_001/optimizer_use.json\n?? examples/model_compression/results/opt_einsum_run_001/output_agreement.json\n?? examples/model_compression/results/opt_einsum_run_001/results.csv\n?? examples/model_compression/results/opt_einsum_run_001/timing_blocks.json\n?? examples/model_compression/results/opt_einsum_run_001/validation.json\n?? examples/model_compression/results/timing_followup/round_1.json\n?? examples/model_compression/results/timing_followup/round_2.json\n?? examples/model_compression/results/timing_followup/round_3.json\n?? examples/model_compression/results/torch_compile_run_001/capture_diagnostics.json\n?? examples/model_compression/results/torch_compile_run_001/comparison.png\n?? examples/model_compression/results/torch_compile_run_001/compression_reports.json\n?? examples/model_compression/results/torch_compile_run_001/configuration.json\n?? examples/model_compression/results/torch_compile_run_001/first_use.json\n?? examples/model_compression/results/torch_compile_run_001/measurement_code.txt\n?? examples/model_compression/results/torch_compile_run_001/output_agreement.json\n?? examples/model_compression/results/torch_compile_run_001/preparation.json\n?? examples/model_compression/results/torch_compile_run_001/presentation.json\n?? examples/model_compression/results/torch_compile_run_001/results.csv\n?? examples/model_compression/results/torch_compile_run_001/setup.json\n?? examples/model_compression/results/torch_compile_run_001/timing_blocks.json\n?? examples/model_compression/tests/test_experiment.py\n?? examples/model_compression/tests/test_opt_einsum_comparison.py\n?? examples/model_compression/tests/test_torch_compile_comparison.py\n?? examples/model_compression/timing_followup.py\n?? examples/model_compression/torch_compile_comparison.ipynb\n?? examples/model_compression/torch_compile_comparison.py\n",
+  "diagnostic_archive": {
+    "reason": "The repository ignores *.log. This lossless archive keeps all detailed diagnostics available for a later commit.",
+    "sha256": "c2369ba7815ca2cdcd0724eb6c1ee2e879a0e6cbfbb2a291bcff301204635975",
+    "contents_verified_byte_for_byte": true,
+    "logs": {
+      "diagnostics/dense_capture.log": "760acedc53d647054563eaec6d9bd200c5c072a2b3c76f42ac93bc84bf0da171",
+      "diagnostics/dense_compile.log": "da741718be5c2e2c823d3253d55a10984b5722862541bc9f1d432d82be964943",
+      "diagnostics/dense_repeat.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "diagnostics/dense_verification.log": "1a231f7fa88fa15fb7523ddabd2d1910986a54edfe34e4d02c15ed993db1a094",
+      "diagnostics/fraction_0.50_capture.log": "999b91b0c2d66f98d0efa8612f4415700373321c8d7d96c8b80bef601aceb648",
+      "diagnostics/fraction_0.50_compile.log": "dcf26f4521062239b6bf48a7741e135471173038b25ad950f2f49456a9d59ccd",
+      "diagnostics/fraction_0.50_repeat.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "diagnostics/fraction_0.50_verification.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "diagnostics/fraction_0.75_capture.log": "0bd0e2b9b21d447ef97c1b77340f666003b4c132d178d1015427e8802f0766b2",
+      "diagnostics/fraction_0.75_compile.log": "5d7530963c57ffc4a232a039bd861dac386942f09651f705cec080fef725c6de",
+      "diagnostics/fraction_0.75_repeat.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "diagnostics/fraction_0.75_verification.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "toolchain_smoke": {
+    "success": true,
+    "first_use_seconds": 3.6738454779997483,
+    "generated_kernels": 1,
+    "counters": {
+      "frames": {
+        "total": 1,
+        "ok": 1
+      },
+      "inductor": {
+        "fxgraph_cache_miss": 1
+      },
+      "stats": {
+        "calls_captured": 3,
+        "unique_graphs": 1
+      },
+      "aot_autograd": {
+        "total": 1,
+        "ok": 1
+      }
+    }
+  },
+  "execution_command": "PYTHONDONTWRITEBYTECODE=1 TORCH_HOME=/home/rafael_magaldi/.cache/tltorch-model-compression/torch JUPYTER_PATH=/home/rafael_magaldi/.cache/tltorch-model-compression/venv/share/jupyter IPYTHONDIR=/home/rafael_magaldi/.cache/tltorch-model-compression/torch-compile/ipython JUPYTER_RUNTIME_DIR=/home/rafael_magaldi/.cache/tltorch-model-compression/torch-compile/jupyter-runtime MPLCONFIGDIR=/home/rafael_magaldi/.cache/tltorch-model-compression/torch-compile/matplotlib /home/rafael_magaldi/.cache/tltorch-model-compression/venv/bin/python -B -u /tmp/torch-compile-comparison-bffb7dtn/execute_notebook.py",
+  "test_command": "PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 /home/rafael_magaldi/.cache/tltorch-model-compression/venv/bin/python -B -m pytest -q -p no:cacheprovider examples/model_compression/tests/test_torch_compile_comparison.py examples/model_compression/tests/test_experiment.py",
+  "note": "Post-execution validation and packaging; diagnostic logs retain original compiler text. No measurements were repeated."
+}

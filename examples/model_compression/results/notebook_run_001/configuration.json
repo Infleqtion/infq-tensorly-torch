@@ -1,0 +1,204 @@
+{
+  "settings": {
+    "device": "cpu",
+    "threads": 4,
+    "batch_size": 16,
+    "workers": 0,
+    "full": false,
+    "seed": 2026,
+    "selection_seed": 2026,
+    "timing_seed": 2027,
+    "warmup": 20,
+    "repeats": 100,
+    "allow_weight_download": false,
+    "dataset": "/home/rafael_magaldi/.cache/tltorch-model-compression/data/imagenetv2-matched-frequency-format-val",
+    "output": "/home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression/examples/model_compression/results/notebook_run_001",
+    "manifest": "/home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression/examples/model_compression/results/cpu_1000/selected_examples.json",
+    "evaluation_size": 1000
+  },
+  "environment": {
+    "python": "3.12.3",
+    "packages": {
+      "torch": "2.5.1+cpu",
+      "torchvision": "0.20.1+cpu",
+      "tensorly": "0.9.0",
+      "numpy": "2.5.2",
+      "scipy": "1.17.1",
+      "Pillow": "12.3.0",
+      "nbformat": "5.11.1",
+      "nbclient": "0.11.0",
+      "ipykernel": "7.3.0",
+      "matplotlib": "3.10.8"
+    },
+    "tltorch_version": "0.5.0",
+    "tltorch_path": "/home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression/tltorch/__init__.py",
+    "platform": "Linux-6.17.0-1033-oem-x86_64-with-glibc2.39",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285H",
+    "cpu_count": 16,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "cuda_available": false,
+    "cuda_version": null,
+    "cuda_devices": [],
+    "threads": 4,
+    "interop_threads": 1,
+    "backend": {
+      "deterministic_algorithms": true,
+      "matmul_precision": "highest",
+      "cuda_matmul_tf32": false,
+      "cudnn_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "mkldnn_enabled": true,
+      "cublas_workspace_config": ":4096:8",
+      "omp_num_threads": null,
+      "mkl_num_threads": null
+    },
+    "repository_revision": "da2df26205971b06f3d06fc63b492e05a8404482",
+    "working_tree_dirty": true,
+    "experiment_sha256": "f4067715e24e01ec991a56967b6dc545e016322f0e7df668e57bf41562a6a41a",
+    "started_utc": "2026-10-16T21:20:12.647775+00:00",
+    "notebook_code_sha256": "1b62d8753a2093356a870a0613dcadf9fe8515ce26588dce317832769e7f482d"
+  },
+  "model": "torchvision.resnet18",
+  "weights": {
+    "identifier": "ResNet18_Weights.IMAGENET1K_V1",
+    "url": "https://download.pytorch.org/models/resnet18-f37072fd.pth",
+    "sha256": "f37072fd47e89c5e827621c5baffa7500819f7896bbacec160b1a16c560e07ec"
+  },
+  "preprocessing": {
+    "description": "ImageClassification(\n    crop_size=[224]\n    resize_size=[256]\n    mean=[0.485, 0.456, 0.406]\n    std=[0.229, 0.224, 0.225]\n    interpolation=InterpolationMode.BILINEAR\n)",
+    "color_mode": "RGB",
+    "resize_size": [
+      256
+    ],
+    "crop_size": [
+      224
+    ],
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "interpolation": "InterpolationMode.BILINEAR",
+    "antialias": true
+  },
+  "dataset": {
+    "release": "ImageNetV2 matched-frequency (imagenetv2-b-33)",
+    "reference_download_url": "https://huggingface.co/datasets/vaishaal/ImageNetV2/resolve/d626240be2538720e83103a0e1178d24aca8b12c/imagenetv2-matched-frequency.tar.gz",
+    "hosting_revision": "d626240be2538720e83103a0e1178d24aca8b12c",
+    "archive_sha256": null,
+    "selected_image_checksums": "SHA-256 for each image in selected_examples.json"
+  },
+  "layers": {
+    "compression_1": {
+      "layer4.0.conv2": {
+        "factorization": "Tucker",
+        "rank": 0.75,
+        "fixed_rank_modes": "spatial"
+      },
+      "layer4.1.conv2": {
+        "factorization": "Tucker",
+        "rank": 0.75,
+        "fixed_rank_modes": "spatial"
+      },
+      "fc": {
+        "factorization": "BlockTT",
+        "rank": 0.75,
+        "in_tensorized_features": [
+          8,
+          8,
+          8
+        ],
+        "out_tensorized_features": [
+          10,
+          10,
+          10
+        ]
+      }
+    },
+    "compression_2": {
+      "layer4.0.conv2": {
+        "factorization": "Tucker",
+        "rank": 0.5,
+        "fixed_rank_modes": "spatial"
+      },
+      "layer4.1.conv2": {
+        "factorization": "Tucker",
+        "rank": 0.5,
+        "fixed_rank_modes": "spatial"
+      },
+      "fc": {
+        "factorization": "BlockTT",
+        "rank": 0.5,
+        "in_tensorized_features": [
+          8,
+          8,
+          8
+        ],
+        "out_tensorized_features": [
+          10,
+          10,
+          10
+        ]
+      }
+    }
+  },
+  "variant_labels": {
+    "dense": "Dense baseline",
+    "compression_1": "Compressed 1",
+    "compression_2": "Compressed 2"
+  },
+  "implementation": "factorized",
+  "dtype": "torch.float32",
+  "timing_input_shape": [
+    1,
+    3,
+    224,
+    224
+  ],
+  "timing_units": "milliseconds per batch",
+  "measurement_order": [
+    "dense",
+    "compression_1",
+    "compression_2"
+  ],
+  "baseline_fingerprint_before": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e",
+  "baseline_fingerprint_after": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e",
+  "flops": {
+    "total": null,
+    "counter": null,
+    "multiply_add_convention": null,
+    "unsupported_operations": null,
+    "coverage": "not assessed",
+    "reason": "No counter with verified coverage of factorized einsum/tensordot contractions was used. No complete or partial FLOP total is reported.",
+    "intentional_exclusions": [
+      "loading",
+      "conversion",
+      "preprocessing",
+      "device transfers"
+    ]
+  },
+  "completed_utc": "2026-10-16T21:21:46.074763+00:00"
+}
