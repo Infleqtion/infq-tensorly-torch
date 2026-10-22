@@ -14,8 +14,8 @@ from torch._dynamo.utils import counters, guard_failures
 from torch._inductor import metrics
 from torch._logging import _internal as torch_logging
 
-from . import experiment
-from .opt_einsum_comparison import backend_settings
+import run_experiment as experiment
+from opt_einsum_comparison import backend_settings
 
 
 def checked_backend_settings():

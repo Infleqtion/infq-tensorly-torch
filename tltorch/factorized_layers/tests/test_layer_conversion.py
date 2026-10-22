@@ -35,11 +35,13 @@ def assert_independent(source, converted):
         torch.testing.assert_close(value, converted_values[name], rtol=0, atol=0)
 
 
-def test_blocktt_conversion_recovers_kronecker_weight():
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable"))])
+def test_blocktt_conversion_recovers_kronecker_weight(device):
     # Unequal row/column modes expose a transposition or incorrect interleaving.
-    left = torch.tensor([[1., -2., 0.5], [3., 0.25, -1.]], dtype=torch.float64)
-    right = torch.tensor([[2., -1.], [0.5, 3.], [-2., 0.75], [1.5, 4.]], dtype=torch.float64)
-    source = nn.Linear(6, 8, bias=False, dtype=torch.float64)
+    left = torch.tensor([[1., -2., 0.5], [3., 0.25, -1.]], dtype=torch.float64, device=device)
+    right = torch.tensor([[2., -1.], [0.5, 3.], [-2., 0.75], [1.5, 4.]], dtype=torch.float64, device=device)
+    source = nn.Linear(6, 8, bias=False, dtype=torch.float64, device=device)
     with torch.no_grad():
         source.weight.copy_(torch.kron(left, right))
     expected = source.weight.detach().clone()
@@ -54,11 +56,13 @@ def test_blocktt_conversion_recovers_kronecker_weight():
 
 
 @pytest.mark.parametrize("factorization,dtype", [("Tucker", torch.float64), ("TT", torch.float32)])
-def test_conv_conversion_recovers_separable_kernel(factorization, dtype):
-    vectors = [torch.tensor(values, dtype=dtype) for values in
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable"))])
+def test_conv_conversion_recovers_separable_kernel(factorization, dtype, device):
+    vectors = [torch.tensor(values, dtype=dtype, device=device) for values in
                ([1., -2., 0.5, 3.], [0.5, 2., -1.], [1., -0.5, 2.], [-1., 0.25])]
     expected = torch.einsum("o,i,h,w->oihw", *vectors)
-    source = nn.Conv2d(3, 4, (3, 2), bias=False, dtype=dtype)
+    source = nn.Conv2d(3, 4, (3, 2), bias=False, dtype=dtype, device=device)
     with torch.no_grad():
         source.weight.copy_(expected)
     rank = (1, 1, 1, 1) if factorization == "Tucker" else (1, 1, 1, 1, 1)
@@ -127,23 +131,25 @@ def test_lossy_conversion_forward_and_optimizer_step(factorization, implementati
 
 
 @pytest.mark.parametrize("factorization", ["BlockTT", "Tucker", "TT"])
-def test_conversion_preserves_state_and_independent_bias(factorization):
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable"))])
+def test_conversion_preserves_state_and_independent_bias(factorization, device):
     torch.manual_seed(23)
     if factorization == "BlockTT":
-        source = nn.Linear(6, 8, dtype=torch.float64)
+        source = nn.Linear(6, 8, dtype=torch.float64, device=device)
     else:
         source = nn.Conv2d(3, 4, (3, 2), stride=(2, 1), padding=(1, 2),
-                           dilation=(1, 2), dtype=torch.float64)
+                           dilation=(1, 2), dtype=torch.float64, device=device)
     source.eval()
     source.weight.requires_grad_(False)
     source.bias.requires_grad_(True)
     before = {name: value.detach().clone() for name, value in source.state_dict().items()}
     if factorization == "BlockTT":
         converted = FactorizedLinear.from_linear(source, factorization=factorization, rank=1)
-        inputs = torch.randn(2, 6, dtype=torch.float64)
+        inputs = torch.randn(2, 6, dtype=torch.float64, device=device)
     else:
         converted = FactorizedConv.from_conv(source, factorization=factorization, rank=0.5)
-        inputs = torch.randn(2, 3, 9, 10, dtype=torch.float64)
+        inputs = torch.randn(2, 3, 9, 10, dtype=torch.float64, device=device)
         assert converted.kernel_size == source.kernel_size
         assert tuple(converted.stride) == source.stride
         assert tuple(converted.padding) == source.padding

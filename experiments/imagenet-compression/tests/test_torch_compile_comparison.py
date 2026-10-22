@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch import nn
 
-from examples.model_compression import torch_compile_comparison as comparison
+import torch_compile_comparison as comparison
 
 
 def test_counter_changes_include_guard_failures():

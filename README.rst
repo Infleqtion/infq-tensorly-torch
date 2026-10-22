@@ -63,82 +63,33 @@ tensorized linear layers, tensor dropout and more!
 Installing TensorLy-Torch
 =========================
 
-Using uv for this checkout and its notebooks
--------------------------------------------
+Using uv for development and the ImageNet experiment
+----------------------------------------------------
 
-This checkout was initialized with ``uv init --bare``. TensorLy-Torch is a
-standard Python package, not a special uv format. ``setup.py`` retains the
-library's original metadata and requirements. ``pyproject.toml`` declares the
-setuptools build backend and local dependency groups; ``uv.lock`` records their
-resolved versions. The default ``dev`` group installs this checkout in editable
-mode, so library edits are visible without reinstalling.
-
-From the repository root, choose the environment you need::
+This checkout was initialized with ``uv init --bare``. ``setup.py`` retains the
+library's original metadata and requirements. ``pyproject.toml`` defines the
+setuptools backend and development groups; ``uv.lock`` records their versions.
+The default ``dev`` group installs this checkout in editable mode. Python 3.12
+is selected by ``.python-version``. From the repository root::
 
     uv sync --locked
-    uv sync --locked --group notebooks
-    uv sync --locked --group notebooks --group opt-einsum
-    uv sync --locked --group notebooks --group plot-styles
 
-The first command installs the library, pytest, coverage support, and the tested
-CPU numerical stack. The second adds JupyterLab, ipykernel, Matplotlib, and
-TorchVision for notebooks. The third enables the opt_einsum comparison. The
-fourth adds the optional Infleqtion plotting styles. Combine the group flags to
-use both optional packages. ``uv sync`` removes packages from groups you do not
-select; include the groups you want to keep each time.
+To include the experiment, notebook, and optional plotting tools while retaining
+other installed tools::
 
-Only ``dev`` is enabled by default. ``plot-styles`` installs from
-``https://github.com/Infleqtion/matplotlib-styles`` at the revision in ``uv.lock``;
-you need read access to that repository and Git authentication if required.
-Without it, the main notebook uses ordinary Matplotlib styling. These groups
-are local dependencies and are not published as library requirements.
+    uv sync --locked --inexact --group experiments --group notebooks --group opt-einsum --group plot-styles
 
-``.python-version`` selects Python 3.12, and the ``dev`` and ``notebooks`` groups
-are restricted to that Python series. You can select it explicitly with
-``uv sync --python 3.12 --locked``. This CPU environment pins PyTorch 2.5.1,
-TorchVision 0.20.1, TensorLy 0.9.0, NumPy 2.5.2, SciPy 1.17.1, and Matplotlib
-3.10.8. TorchVision and Matplotlib are only installed with ``notebooks``.
-These are tested environment versions, not new minimum versions for library
-users. Other Python and dependency versions have not been validated here.
+Include the groups you want to manage each time you synchronize. ``plot-styles``
+requires read access to the locked Infleqtion Git repository. These are environment
+dependencies, not new published library requirements. Packaging remains in
+``setup.py``; there is deliberately no duplicate ``[project]`` metadata table.
 
-There is deliberately no ``[project]`` metadata table: the ``dev`` group refers
-to this directory as an editable dependency, leaving packaging in ``setup.py``.
-uv may report that it is inferring ``requires-python >=3.12`` for the workspace;
-that applies to its environment lock, not the built library's metadata.
-
-Start Jupyter or run tests with the relevant groups::
-
-    uv run --locked --group notebooks jupyter lab
-    uv run --locked --group notebooks --group opt-einsum --group plot-styles jupyter lab
-    uv run --locked pytest
-
-In VS Code's notebook kernel picker, choose **Python Environments** and select
-this checkout's ``.venv/bin/python``. In JupyterLab, select this environment's
-kernel rather than a historical kernel saved in notebook metadata. To give it
-a recognizable name, run::
-
-    uv run --locked --group notebooks python -m ipykernel install --sys-prefix --name tltorch-uv --display-name "TensorLy-Torch (uv)"
-
-Then select **TensorLy-Torch (uv)**. This registers a kernel inside ``.venv``;
-it does not replace kernels in other environments. Add environment dependencies
-with ``uv add --group dev PACKAGE_NAME`` or ``uv add --group notebooks PACKAGE_NAME``.
-Library runtime requirements remain in ``setup.py``. Keep ``.venv`` and build
-artifacts out of Git.
-
-The main notebook and CLI explicitly disable PyTorch's opt_einsum integration
-in their shared runtime setup, even when the package is installed. New run
-configurations record its availability, enabled flag, strategy, and the state
-of TensorLy's separate plugin, which stays inactive. The opt_einsum comparison
-still selects disabled and enabled execution explicitly; the compile comparison
-keeps it disabled. Installing dependencies does not update historical results.
-
-The model-compression notebooks still need cached weights, and the main accuracy
-notebook also needs ImageNetV2. Follow ``examples/model_compression/README.md`` for
-the data paths and explicit downloads. Choose new result directories before
-rerunning notebooks; their saved directories already exist. The torch.compile
-comparison also needs a working C++ compiler. Existing requirements files and
-saved environments remain records of the earlier runs and are not changed by
-this uv setup.
+The ImageNet workflow lives in ``experiments/imagenet-compression/``. Its
+`README <experiments/imagenet-compression/README.md>`_ explains data preparation,
+the single runner, configurations, local CPU/CUDA setup, VSCode/Jupyter selection,
+tracking, checkpoints, notebooks, and historical records. The CUDA environment
+also runs CPU experiments without reinstalling packages. Existing measurements
+retain their original recorded environments.
 
 Using this library in another uv project
 ---------------------------------------

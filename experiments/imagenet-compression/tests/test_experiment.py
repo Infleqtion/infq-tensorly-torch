@@ -9,7 +9,7 @@ import pytest
 import torch
 from torch import nn
 
-from examples.model_compression import experiment
+import run_experiment as experiment
 
 
 def make_folders(root):
@@ -86,10 +86,10 @@ def test_import_does_not_import_torchvision_or_download():
 import sys
 from unittest.mock import patch
 with patch("urllib.request.urlopen", side_effect=AssertionError("No network on import")):
-    from examples.model_compression import experiment
+    import run_experiment as experiment
 assert "torchvision" not in sys.modules
 '''
-    subprocess.run([sys.executable, "-B", "-c", code], check=True)
+    subprocess.run([sys.executable, "-B", "-c", code], check=True, cwd=experiment.EXPERIMENT_DIR)
 
 
 def test_small_measurement_and_conversion_integration(monkeypatch):
@@ -102,7 +102,7 @@ def test_small_measurement_and_conversion_integration(monkeypatch):
               "in_tensorized_features": (2, 2), "out_tensorized_features": (2, 3)}})
     batches = [(torch.ones(2, 4), torch.tensor([0, 1])), (torch.zeros(1, 4), torch.tensor([2]))]
     observations, reports = experiment.run_comparison(baseline, batches, torch.ones(1, 4), warmup=1, repeats=3)
-    rows = experiment.comparison_rows(observations, reports)
+    rows = experiment.notebook_comparison_rows(observations, reports)
     assert len(rows) == 3 and all(row["examples"] == 3 for row in rows)
     assert rows[0]["parameter_count"] == 30  # 6x4 trained weights plus six biases.
     assert all(row["flops_total"] is None for row in rows)
@@ -144,7 +144,7 @@ if sys.argv[1] == "False":
 import torch
 import torch.backends.opt_einsum as backend
 from tensorly import plugins
-from examples.model_compression import experiment
+import run_experiment as experiment
 
 installed = sys.argv[1] == "True"
 assert backend.is_available() == installed
@@ -164,4 +164,4 @@ assert actual["tensorly_plugin_inactive"]
 values = torch.ones(2, 2)
 assert torch.equal(torch.einsum("ij,jk,kl->il", values, values, values), torch.full((2, 2), 4.))
 """
-    subprocess.run([sys.executable, "-B", "-c", code, str(opt_einsum_installed)], check=True)
+    subprocess.run([sys.executable, "-B", "-c", code, str(opt_einsum_installed)], check=True, cwd=experiment.EXPERIMENT_DIR)

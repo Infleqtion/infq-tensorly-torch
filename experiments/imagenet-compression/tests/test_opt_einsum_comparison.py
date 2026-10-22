@@ -5,7 +5,7 @@ import torch
 from torch import nn
 import torch.backends.opt_einsum as backend
 
-from examples.model_compression import opt_einsum_comparison as comparison
+import opt_einsum_comparison as comparison
 
 
 @pytest.mark.skipif(not backend.is_available(), reason="Optional opt_einsum comparison environment required")

@@ -14,7 +14,7 @@ import sys
 
 import torch
 
-from examples.model_compression import experiment
+import run_experiment as experiment
 from tltorch import compress_model
 
 

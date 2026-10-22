@@ -9,7 +9,7 @@ import torch.backends.opt_einsum as torch_opt_einsum
 import tensorly as tl
 from tensorly import plugins, tenalg
 
-from . import experiment
+import run_experiment as experiment
 
 
 @contextmanager

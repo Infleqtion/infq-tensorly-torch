@@ -4,16 +4,22 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [dependency-groups]
-# Include this checkout and the tested CPU stack without changing library requirements.
+# Include this checkout and the tested CPU/CUDA stack without changing library requirements.
 dev = [
     "tensorly-torch",
     "numpy==2.5.2",
     "packaging",
     "scipy==1.17.1",
     "tensorly==0.9.0",
-    "torch==2.5.1",
+    "torch==2.7.1",
     "pytest>=9.1.1",
     "pytest-cov",
+]
+experiments = [
+    "mlflow-skinny>=3,<4",
+    "pillow==12.3.0",
+    "pyyaml>=6,<7",
+    "torchvision==0.22.1",
 ]
 notebooks = [
     "ipykernel>=7.3.0",
@@ -22,7 +28,7 @@ notebooks = [
     "nbclient>=0.11.0",
     "nbformat>=5.11.1",
     "pillow==12.3.0",
-    "torchvision==0.20.1",
+    "torchvision==0.22.1",
 ]
 opt-einsum = ["opt-einsum==3.4.0"]
 plot-styles = ["matplotlib-styles"]
@@ -33,15 +39,16 @@ default-groups = ["dev"]
 [tool.uv.dependency-groups]
 # These are environment constraints, not a claim about the library's compatibility.
 dev = {requires-python = ">=3.12,<3.13"}
+experiments = {requires-python = ">=3.12,<3.13"}
 notebooks = {requires-python = ">=3.12,<3.13"}
 
 [tool.uv.sources]
 tensorly-torch = {path = ".", editable = true}
-torch = {index = "pytorch-cpu"}
-torchvision = {index = "pytorch-cpu"}
+torch = {index = "pytorch"}
+torchvision = {index = "pytorch"}
 matplotlib-styles = {git = "https://github.com/Infleqtion/matplotlib-styles"}
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true

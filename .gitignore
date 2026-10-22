@@ -78,3 +78,10 @@ target/
 
 # Local uv environment
 .venv/
+
+# Generated ImageNetV2 data; preparation code and its README stay trackable.
+/experiments/imagenet-compression/data/raw/imagenetv2/
+/experiments/imagenet-compression/data/processed/imagenetv2/
+
+# New run artifacts; retained historical results remain trackable.
+/experiments/imagenet-compression/results/runs/

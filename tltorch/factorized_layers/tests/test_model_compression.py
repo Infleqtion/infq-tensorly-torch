@@ -1165,16 +1165,19 @@ def new_factorization_case(kind):
 
 @pytest.mark.parametrize("kind", ["linear-cp", "linear-tucker", "conv-cp"])
 @pytest.mark.parametrize("implementation", ["factorized", "reconstructed"])
-def test_new_factorizations_fit_known_weights(kind, implementation):
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable"))])
+def test_new_factorizations_fit_known_weights(kind, implementation, device):
     torch.manual_seed(40)
     source, settings = new_factorization_case(kind)
+    source.to(device)
     source.eval()
     source.bias.requires_grad_(False)
     shape = tuple(source.weight.shape) if kind == "conv-cp" else (2, 4, 3, 2)
     # An outer product has rank one in every mode, with nonconstant entries.
-    weight = torch.tensor(1., dtype=torch.float64)
+    weight = torch.tensor(1., dtype=torch.float64, device=device)
     for size in shape:
-        weight = weight.unsqueeze(-1) * torch.linspace(0.5, 1., size, dtype=torch.float64)
+        weight = weight.unsqueeze(-1) * torch.linspace(0.5, 1., size, dtype=torch.float64, device=device)
     with torch.no_grad():
         source.weight.copy_(weight.reshape_as(source.weight))
     if settings["factorization"] == "CP":
@@ -1185,7 +1188,7 @@ def test_new_factorizations_fit_known_weights(kind, implementation):
     assert_state_values(source, before)
     reconstructed = converted.weight.to_tensor() if kind == "conv-cp" else converted.weight.to_matrix()
     torch.testing.assert_close(reconstructed, source.weight, rtol=1e-7, atol=1e-8)
-    inputs = torch.randn((2, 3, 9, 8) if kind == "conv-cp" else (2, 6), dtype=torch.float64)
+    inputs = torch.randn((2, 3, 9, 8) if kind == "conv-cp" else (2, 6), dtype=torch.float64, device=device)
     torch.testing.assert_close(converted(inputs), source(inputs), rtol=1e-7, atol=1e-8)
     assert report["replacements"][0]["weight_error"]["relative"] < 1e-7
     assert not converted.training and not converted.bias.requires_grad
@@ -1201,15 +1204,20 @@ def test_new_factorizations_fit_known_weights(kind, implementation):
 
 @pytest.mark.parametrize("kind", ["linear-cp", "linear-tucker", "conv-cp"])
 @pytest.mark.parametrize("implementation", ["factorized", "reconstructed"])
-def test_new_lossy_factorizations_match_dense_execution_and_train(kind, implementation):
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable"))])
+def test_new_lossy_factorizations_match_dense_execution_and_train(kind, implementation, device):
     torch.manual_seed(41)
     source, settings = new_factorization_case(kind)
+    source.to(device)
     source.bias.requires_grad_(False)
     before = state_values(source)
     converted, report = compress_model(source, {"": settings}, implementation=implementation)
+    assert all(p.device == source.weight.device and p.dtype == source.weight.dtype
+               for p in converted.parameters())
     assert report["replacements"][0]["weight_error"]["relative"] > 0.1
     inputs = torch.randn((2, 3, 9, 8) if kind == "conv-cp" else (2, 6),
-                         dtype=torch.float64, requires_grad=True)
+                         dtype=torch.float64, device=device, requires_grad=True)
     reference_inputs = inputs.detach().clone().requires_grad_(True)
     if kind == "conv-cp":
         reference = F.conv2d(reference_inputs, converted.weight.to_tensor().detach(), converted.bias.detach(),
@@ -1234,9 +1242,12 @@ def test_new_lossy_factorizations_match_dense_execution_and_train(kind, implemen
 
 
 @pytest.mark.parametrize("kind,count", [("linear-cp", 20), ("linear-tucker", 20), ("conv-cp", 17)])
-def test_new_factorization_storage_and_parameter_caps_include_frozen_weights(kind, count):
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable"))])
+def test_new_factorization_storage_and_parameter_caps_include_frozen_weights(kind, count, device):
     torch.manual_seed(42)
     source, settings = new_factorization_case(kind)
+    source.to(device)
     source.weight.requires_grad_(False)
     settings["max_parameters"] = count
     before, random_state = state_values(source), rng_states()
