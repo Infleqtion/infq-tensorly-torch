@@ -33,6 +33,7 @@ timing:
   warmup: 20
   repeats: 100
 tracking:
+  uri: http://127.0.0.1:9361
   workspace: quirc
   experiment_name: model-compression
   run_name: resnet18-exploration-tucker-blocktt-075

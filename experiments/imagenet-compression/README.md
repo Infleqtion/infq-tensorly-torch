@@ -160,14 +160,19 @@ CUDA availability, artifact access, and serialization are checked during executi
 After local review and the separate Cheetah setup check, the execution command is:
 
 ```bash
-export MLFLOW_TRACKING_URI="https://your-existing-tracking-server"
 uv run --no-sync python experiments/imagenet-compression/run_experiment.py --config experiments/imagenet-compression/configs/resnet18_exploration.yaml
 ```
 
-Use the actual HTTP(S) server address. The required `tracking.workspace` setting
-selects the workspace before any experiment lookup or run creation; the example
-uses `quirc`. Access errors stop execution without another workspace or local
-tracking fallback. The workspace is saved in both configurations, `run.json`,
+The required `tracking.uri` in YAML supplies the HTTP(S) server address; the
+example uses `http://127.0.0.1:9361` on Cheetah. No `MLFLOW_TRACKING_URI` export is
+needed, and an existing value cannot override the configuration. URI validation
+rejects embedded credentials, whitespace, malformed ports, query parameters, and
+fragments before any tracking request. The runner calls `mlflow.set_tracking_uri`,
+`mlflow.set_workspace`, and `mlflow.set_experiment` in that order, then uses the
+returned experiment ID in one `with mlflow.start_run(...)` block. The required
+workspace is `quirc` in the example. Access errors stop execution without another
+workspace or local tracking fallback. `MLFLOW_RUN_ID` must be unset so MLflow
+cannot silently resume an earlier run. The workspace is saved in both configurations, `run.json`,
 and the `tracking.workspace` run tag, and printed with the experiment/run IDs.
 Credentials belong in MLflow-supported
 environment variables or external credential configuration, never in YAML or the
@@ -196,12 +201,16 @@ implementation, and seed parameters remain available. Tags `git.branch`,
 `git.commit`, and `git.dirty` describe the actual checkout; `git.dirty` is `true`
 or `false`, and does not prevent a run.
 
-Metrics and artifacts are uploaded synchronously. A run is marked finished only
-after model verification and all required successful-run uploads complete. On
+Parameters, metrics, and artifacts use MLflow's fluent logging functions, which
+write to the active run. Uploads remain synchronous. The run context marks success
+only after model verification and all required successful-run uploads complete. On
 failure, the runner retains `failure.json` with the original error and traceback,
 attempts to upload it, and independently attempts to mark the run failed. Neither
-tracking error hides the original exception or removes local evidence. Failure
-handling uploads only the diagnostic, never a partly written or unverified model.
+tracking error hides the original exception or removes local evidence, including
+an error raised while closing the run context. Once that context has closed,
+diagnostics explicitly target the saved run ID; the status retry also targets
+that ID rather than opening another run. Failure handling uploads only the
+diagnostic, never a partly written or unverified model.
 
 Prepare inputs using [data/README.md](data/README.md), and use the
 [explicit weight-cache setup](HISTORICAL-RUNS.md#explicit-downloads-and-image-use-guidance).
@@ -307,8 +316,9 @@ PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python -B -m pytest \
 ## Manual execution on Cheetah
 
 Use the dedicated checkout at `/home/rafael/projects/infq-tensorly-torch` on
-branch `rafael/exp`. The server address below is local to Cheetah; running this
-command on a laptop does not send computation to Cheetah.
+branch `rafael/exp`. The YAML's server address, `http://127.0.0.1:9361`, is local
+to Cheetah; running this command on a laptop does not send computation to Cheetah.
+Change `tracking.uri` in a configuration intended for another server.
 
 The shared server is managed separately. MLflow automatically reads the existing
 `/home/rafael/.mlflow/credentials`; do not copy credentials into the checkout,
@@ -330,12 +340,13 @@ notebook or plotting groups. Keep the copied raw images under
 prepared files under `data/processed/imagenetv2/` in that experiment directory.
 Use `$HOME/.cache/tltorch-model-compression/torch` for the matching cached weight
 file. Transfer and hash-check these existing inputs; do not regenerate selections.
+`TORCH_HOME` is PyTorch's weight-cache setting and remains separate from MLflow;
+its behavior and the export below are unchanged.
 
 For a readiness check, run only:
 
 ```bash
 cd /home/rafael/projects/infq-tensorly-torch
-export MLFLOW_TRACKING_URI=http://127.0.0.1:9361
 export TORCH_HOME="$HOME/.cache/tltorch-model-compression/torch"
 /home/rafael/.local/bin/uv run --no-sync python experiments/imagenet-compression/run_experiment.py --config experiments/imagenet-compression/configs/resnet18_exploration.yaml --dry-run
 ```

@@ -258,9 +258,13 @@ equal model sizes. Interpret FLOPs only when coverage supports the comparison.
 ## Track comparisons with the shared MLflow server
 
 Use the existing shared MLflow server on Cheetah. Normal configured execution
-requires an HTTP(S) tracking address and a nonempty `tracking.workspace`; the
-existing configuration selects `quirc` before experiment lookup or run creation.
-On Cheetah use `http://127.0.0.1:9361` and let the client read the existing
+requires an HTTP(S) `tracking.uri` and a nonempty `tracking.workspace` in YAML.
+The existing configuration sets `http://127.0.0.1:9361` and `quirc`. No
+`MLFLOW_TRACKING_URI` export is needed; the configured URI overrides any ambient
+value. The runner visibly selects URI, workspace, and experiment, then uses the
+returned experiment ID in one `with mlflow.start_run(...)` block. Parameters,
+metrics, and artifacts are logged through that active run. Reject an inherited
+`MLFLOW_RUN_ID` rather than resuming a previous execution. Let MLflow read the existing
 `/home/rafael/.mlflow/credentials` automatically. Never archive credentials.
 Workspace access failures stop execution without falling back elsewhere. The
 workspace is saved in configurations, `run.json`, and a run tag.
@@ -296,7 +300,9 @@ Configuration/source artifacts are uploaded before model loading, and
 environment/input provenance before compression. Local measurements and failure
 evidence are retained as execution progresses. After a run is created, a failure
 record with its traceback is uploaded if possible, and marking the run failed
-is attempted separately. Tracking failures do not replace the original exception.
+is attempted separately. Diagnostic uploads and status retries target the saved
+run ID even after its context closes. Tracking failures, including context-exit
+errors, do not replace the original exception.
 A run finishes only after checkpoint verification and required uploads succeed;
 an incomplete checkpoint is not uploaded as a verified model.
 

@@ -146,10 +146,11 @@ def load_config(path):
     if (not isinstance(shape, list) or len(shape) != 4
             or any(type(n) is not int or n < 1 for n in shape) or shape[1] != 3):
         raise ValueError("timing.input_shape must be four positive integers [batch, 3, height, width]")
-    _keys(config["tracking"], ("workspace", "experiment_name", "run_name"), (), "tracking")
+    _keys(config["tracking"], ("uri", "workspace", "experiment_name", "run_name"), (), "tracking")
     for key, value in config["tracking"].items():
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"tracking.{key} must be a nonempty string")
+    validate_tracking_uri(config["tracking"]["uri"])
     return config, original
 
 
@@ -699,14 +700,21 @@ def save_and_verify_model(model, report, inputs, output):
     return verification
 
 
-def tracking_address():
-    """Require a remote server; credentials belong in MLflow's external configuration."""
-    address = os.environ.get("MLFLOW_TRACKING_URI", "")
-    parsed = urlparse(address)
-    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
-            or parsed.password or parsed.query or parsed.fragment or any(c.isspace() for c in address)):
-        raise ValueError("Set MLFLOW_TRACKING_URI to an explicit HTTP(S) server address without credentials or query parameters")
-    return address
+def validate_tracking_uri(address):
+    """Require a configured HTTP(S) server; credentials stay in MLflow's own setup."""
+    message = ("tracking.uri must be an HTTP(S) server URI without credentials, "
+               "whitespace, query parameters, or fragments")
+    if not isinstance(address, str) or not address.strip():
+        raise ValueError(message)
+    try:
+        parsed = urlparse(address)
+        parsed.port  # Reject malformed or out-of-range ports before any tracking request.
+    except ValueError:
+        raise ValueError(message) from None
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or any(c.isspace() for c in address)):
+        raise ValueError(message)
 
 
 def cached_weights():
@@ -751,8 +759,10 @@ def comparison_rows(observations, report):
     return rows
 
 
-def log_requested_settings(client, run_id, config):
+def log_requested_settings(config):
     """Expose comparison settings as parameters, without mixing in conversion results."""
+    import mlflow
+
     runtime, timing = config["runtime"], config["timing"]
     layers = config["compression"]["layers"]
     parameters = {
@@ -777,19 +787,20 @@ def log_requested_settings(client, run_id, config):
     for key, value in parameters.items():
         # JSON keeps rank 1 distinct from target 1.0 and makes lists unambiguous.
         encoded = value if isinstance(value, str) else json.dumps(value, sort_keys=True, allow_nan=False)
-        client.log_param(run_id, key, encoded, synchronous=True)
+        mlflow.log_param(key, encoded, synchronous=True)
 
 
-def run_experiment(config, original_config, *, client=None):
+def run_experiment(config, original_config):
     """Validate inputs, establish tracking, then load, compress, measure, save, and finish.
 
-    Tests supply a recording client; real execution always requires a tracking server.
+    Tests record the MLflow calls offline; execution requires the configured server.
     """
     import torch
     import numpy as np
     from tltorch import compress_model
 
-    address = tracking_address()
+    tracking = config["tracking"]
+    validate_tracking_uri(tracking["uri"])
     manifest, manifest_bytes = read_manifest(config["data"]["raw_dir"], config["data"]["manifest"])
     weight_path, weight_info = cached_weights()
     runtime, timing = config["runtime"], config["timing"]
@@ -808,112 +819,123 @@ def run_experiment(config, original_config, *, client=None):
         "effective_config_file_sha256": file_sha256(output / "effective_config.json"),
     }
     run_id = None
+    operation_error = None
     try:
-        from mlflow import MlflowClient, set_workspace
+        import mlflow
 
-        tracking = config["tracking"]
-        set_workspace(tracking["workspace"])
-        if client is None:
-            client = MlflowClient(tracking_uri=address)
-        experiment = client.get_experiment_by_name(tracking["experiment_name"])
-        experiment_id = experiment.experiment_id if experiment else client.create_experiment(tracking["experiment_name"])
+        # start_run otherwise treats this environment variable as a request to resume.
+        if os.environ.get("MLFLOW_RUN_ID"):
+            raise ValueError("Unset MLFLOW_RUN_ID: each execution must create a new run")
+        mlflow.set_tracking_uri(tracking["uri"])
+        mlflow.set_workspace(tracking["workspace"])
+        experiment = mlflow.set_experiment(tracking["experiment_name"])
+        experiment_id = experiment.experiment_id
         revision = save_source(output)
-        tags = {"tracking.workspace": tracking["workspace"], "git.branch": revision["branch"], "git.commit": revision["commit"],
+        tags = {"tracking.workspace": tracking["workspace"], "git.branch": revision["branch"],
+                "git.commit": revision["commit"],
                 "git.dirty": str(bool(revision["working_tree_status"].strip())).lower()}
-        run_id = client.create_run(experiment_id, run_name=tracking["run_name"], tags=tags).info.run_id
-        write_json(output / "run.json", {"workspace": tracking["workspace"],
-                                         "experiment_id": experiment_id, "run_id": run_id,
-                                         **configuration_hashes})
-        print(f"Starting MLflow workspace {tracking['workspace']}, experiment {experiment_id}, "
-              f"run {run_id}. Local output: {output}", flush=True)
-        # Fail early if the server accepts runs but cannot store artifacts.
-        client.log_artifact(run_id, str(output / "effective_config.json"))
-        for filename in ("original_config.yaml", "run.json", "source.json", "source.zip"):
-            client.log_artifact(run_id, str(output / filename))
-        log_requested_settings(client, run_id, config)
-        for key, value in {"git_commit": revision["commit"], **configuration_hashes,
-                           "source_archive_sha256": revision["source_archive_sha256"],
-                           "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest()}.items():
-            client.log_param(run_id, key, value, synchronous=True)
+        with mlflow.start_run(experiment_id=experiment_id, run_name=tracking["run_name"], tags=tags) as run:
+            run_id = run.info.run_id
+            try:
+                write_json(output / "run.json", {"workspace": tracking["workspace"],
+                                                 "experiment_id": experiment_id, "run_id": run_id,
+                                                 **configuration_hashes})
+                print(f"Starting MLflow workspace {tracking['workspace']}, experiment {experiment_id}, "
+                      f"run {run_id}. Local output: {output}", flush=True)
+                # Fail early if the server accepts runs but cannot store artifacts.
+                mlflow.log_artifact(str(output / "effective_config.json"))
+                for filename in ("original_config.yaml", "run.json", "source.json", "source.zip"):
+                    mlflow.log_artifact(str(output / filename))
+                log_requested_settings(config)
+                for key, value in {"git_commit": revision["commit"], **configuration_hashes,
+                                   "source_archive_sha256": revision["source_archive_sha256"],
+                                   "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest()}.items():
+                    mlflow.log_param(key, value, synchronous=True)
 
-        baseline, preprocessing = load_cached_baseline(weight_path, device)
-        original_state = model_fingerprint(baseline)
-        environment = environment_info()
-        for package in ("mlflow-skinny", "PyYAML"):
-            environment["packages"][package] = importlib.metadata.version(package)
-        provenance = {"environment": environment, "git": revision, "model": config["model"],
-                      "weights": weight_info,
-                      "preprocessing": {"description": str(preprocessing),
-                                        **{key: getattr(preprocessing, key, None) for key in
-                                           ("resize_size", "crop_size", "mean", "std", "antialias")},
-                                        "interpolation": str(getattr(preprocessing, "interpolation", None))},
-                      "dataset": manifest.get("dataset"), "selection_seed": manifest.get("seed"),
-                      "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
-                      **configuration_hashes,
-                      "seeds": {"runtime": runtime["seed"], "timing": timing["seed"]},
-                      "flops": FLOPS, "execution": "eager; no torch.compile",
-                      "macro_metrics": "Unweighted mean across all model output classes. Undefined precision, recall, and F1 are zero.",
-                      "latency_units": "milliseconds per batch; excludes loading, preprocessing, transfers, and conversion"}
-        write_json(output / "provenance.json", provenance)
-        for filename in ("evaluation_manifest.json", "provenance.json"):
-            client.log_artifact(run_id, str(output / filename))
+                baseline, preprocessing = load_cached_baseline(weight_path, device)
+                original_state = model_fingerprint(baseline)
+                environment = environment_info()
+                for package in ("mlflow-skinny", "PyYAML"):
+                    environment["packages"][package] = importlib.metadata.version(package)
+                provenance = {"environment": environment, "git": revision, "model": config["model"],
+                              "weights": weight_info,
+                              "preprocessing": {"description": str(preprocessing),
+                                                **{key: getattr(preprocessing, key, None) for key in
+                                                   ("resize_size", "crop_size", "mean", "std", "antialias")},
+                                                "interpolation": str(getattr(preprocessing, "interpolation", None))},
+                              "dataset": manifest.get("dataset"), "selection_seed": manifest.get("seed"),
+                              "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                              **configuration_hashes,
+                              "seeds": {"runtime": runtime["seed"], "timing": timing["seed"]},
+                              "flops": FLOPS, "execution": "eager; no torch.compile",
+                              "macro_metrics": "Unweighted mean across all model output classes. Undefined precision, recall, and F1 are zero.",
+                              "latency_units": "milliseconds per batch; excludes loading, preprocessing, transfers, and conversion"}
+                write_json(output / "provenance.json", provenance)
+                for filename in ("evaluation_manifest.json", "provenance.json"):
+                    mlflow.log_artifact(str(output / filename))
 
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        started = time.perf_counter()
-        # Decomposition creates trainable parameters and must stay outside inference mode.
-        compressed, report = compress_model(baseline, config["compression"]["layers"],
-                                            implementation=config["compression"]["implementation"])
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        conversion_seconds = time.perf_counter() - started
-        if model_fingerprint(baseline) != original_state:
-            raise RuntimeError("Conversion changed baseline parameters or buffers")
-        write_json(output / "compression_report.json", report)
-        batches = make_loader(config["data"]["raw_dir"], manifest, preprocessing,
-                              batch_size=runtime["batch_size"], workers=runtime["workers"], seed=runtime["seed"])
-        inputs = torch.randn(*timing["input_shape"], device=device, dtype=torch.float32,
-                             generator=torch.Generator(device=device).manual_seed(timing["seed"]))
-        observations = {}
-        for name, model in (("dense", baseline), ("compressed", compressed)):
-            accuracy = evaluate(model, batches, device)
-            latency = measure_latency(model, inputs, warmup=timing["warmup"], repeats=timing["repeats"])
-            observations[name] = {"accuracy": accuracy, "latency": latency}
-            write_json(output / "measurements.json", {"conversion_seconds": conversion_seconds, "models": observations})
-        if model_fingerprint(baseline) != original_state:
-            raise RuntimeError("Evaluation changed baseline parameters or buffers")
-        rows = comparison_rows(observations, report)
-        write_csv(output / "results.csv", rows)
-        write_json(output / "latency_samples.json", {name: item["latency"]["samples_ms"] for name, item in observations.items()})
-        (output / "report.md").write_text(results_table(rows) + "\n\n" + provenance["macro_metrics"] +
-                                          "\n\nFLOPs unavailable: " + FLOPS["reason"] + "\n")
-        save_and_verify_model(compressed, report, inputs, output)
-        for row in rows:
-            for key, value in row.items():
-                if type(value) in (int, float) and math.isfinite(value):
-                    client.log_metric(run_id, f"{row['variant']}.{key}", float(value), synchronous=True)
-        client.log_metric(run_id, "conversion_seconds", conversion_seconds, synchronous=True)
-        # The run remains open until checkpoint verification and every required upload succeed.
-        client.log_artifacts(run_id, str(output))
-        client.set_terminated(run_id, status="FINISHED")
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                started = time.perf_counter()
+                # Decomposition creates trainable parameters and must stay outside inference mode.
+                compressed, report = compress_model(baseline, config["compression"]["layers"],
+                                                    implementation=config["compression"]["implementation"])
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                conversion_seconds = time.perf_counter() - started
+                if model_fingerprint(baseline) != original_state:
+                    raise RuntimeError("Conversion changed baseline parameters or buffers")
+                write_json(output / "compression_report.json", report)
+                batches = make_loader(config["data"]["raw_dir"], manifest, preprocessing,
+                                      batch_size=runtime["batch_size"], workers=runtime["workers"], seed=runtime["seed"])
+                inputs = torch.randn(*timing["input_shape"], device=device, dtype=torch.float32,
+                                     generator=torch.Generator(device=device).manual_seed(timing["seed"]))
+                observations = {}
+                for name, model in (("dense", baseline), ("compressed", compressed)):
+                    accuracy = evaluate(model, batches, device)
+                    latency = measure_latency(model, inputs, warmup=timing["warmup"], repeats=timing["repeats"])
+                    observations[name] = {"accuracy": accuracy, "latency": latency}
+                    write_json(output / "measurements.json", {"conversion_seconds": conversion_seconds, "models": observations})
+                if model_fingerprint(baseline) != original_state:
+                    raise RuntimeError("Evaluation changed baseline parameters or buffers")
+                rows = comparison_rows(observations, report)
+                write_csv(output / "results.csv", rows)
+                write_json(output / "latency_samples.json", {name: item["latency"]["samples_ms"] for name, item in observations.items()})
+                (output / "report.md").write_text(results_table(rows) + "\n\n" + provenance["macro_metrics"] +
+                                                  "\n\nFLOPs unavailable: " + FLOPS["reason"] + "\n")
+                save_and_verify_model(compressed, report, inputs, output)
+                for row in rows:
+                    for key, value in row.items():
+                        if type(value) in (int, float) and math.isfinite(value):
+                            mlflow.log_metric(f"{row['variant']}.{key}", float(value), synchronous=True)
+                mlflow.log_metric("conversion_seconds", conversion_seconds, synchronous=True)
+                # The run remains open until checkpoint verification and every required upload succeed.
+                mlflow.log_artifacts(str(output))
+            except BaseException as error:
+                # MLflow's context exit can itself fail while updating run status.
+                operation_error = error
+                raise
         return output
     except BaseException as error:
+        if operation_error is not None:
+            error = operation_error
         try:
             write_json(output / "failure.json", {"run_id": run_id, "error_type": type(error).__name__,
-                                                "error": str(error), "traceback": traceback.format_exc()})
+                                                "error": str(error),
+                                                "traceback": "".join(traceback.format_exception(error))})
         except Exception:
             pass  # Diagnostic write failures must not hide the original failure.
         if run_id is not None:
-            # Upload only the diagnostic, never a checkpoint that may be incomplete or unverified.
+            # The context may already be closed: target this run explicitly, never start another.
             try:
-                client.log_artifact(run_id, str(output / "failure.json"))
+                mlflow.log_artifact(str(output / "failure.json"), run_id=run_id)
             except Exception:
                 pass
             try:
-                client.set_terminated(run_id, status="FAILED")
+                mlflow.MlflowClient(tracking_uri=tracking["uri"]).set_terminated(run_id, status="FAILED")
             except Exception:
                 pass
-        raise
+        raise error
 
 
 # The saved notebooks compare multiple variants. They share the runtime, loading,

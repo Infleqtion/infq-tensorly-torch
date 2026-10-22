@@ -1,5 +1,6 @@
 """Offline workflow checks: tiny synthetic images/models and a recording MLflow client."""
 
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -45,6 +46,9 @@ def test_config_keeps_rank_types_and_uses_experiment_paths(config_file, tmp_path
 
 @pytest.mark.parametrize("change,message", [
     (lambda c: c.update(unknown=True), "unknown options"),
+    (lambda c: c["tracking"].pop("uri"), "missing options.*uri"),
+    (lambda c: c["tracking"].update(uri=""), "tracking.uri must be a nonempty string"),
+    (lambda c: c["tracking"].update(uri=None), "tracking.uri must be a nonempty string"),
     (lambda c: c["tracking"].pop("workspace"), "missing options.*workspace"),
     (lambda c: c["tracking"].update(workspace="  "), "tracking.workspace must be a nonempty string"),
     (lambda c: c["tracking"].update(workspace=None), "tracking.workspace must be a nonempty string"),
@@ -212,24 +216,54 @@ assert model.remember.item() == 7
                    cwd=tmp_path, check=True)
 
 
-class RecordingClient:
-    def __init__(self, events, fail=None):
-        self.events, self.fail = events, fail
+class RecordingMlflow:
+    """Record fluent calls and model the context closing before diagnostics are uploaded."""
+
+    def __init__(self):
+        self.events, self.fail = [], None
         self.metrics = {}
         self.params, self.tags, self.uploads = {}, {}, {}
+        self.uri = self.workspace = self.active_run_id = None
+        self.run_count = 0
 
-    def get_experiment_by_name(self, name):
-        self.events.append("lookup experiment")
+    def set_tracking_uri(self, uri):
+        self.events.append(f"uri {uri}")
+        self.uri = uri
+
+    def set_workspace(self, workspace):
+        assert self.uri is not None
+        self.events.append(f"workspace {workspace}")
+        self.workspace = workspace
+
+    def set_experiment(self, name):
+        assert self.uri is not None and self.workspace is not None
+        self.events.append(f"experiment {name}")
         return SimpleNamespace(experiment_id="experiment-1")
 
-    def create_run(self, experiment_id, **kwargs):
+    @contextmanager
+    def start_run(self, *, experiment_id, run_name, tags):
+        assert experiment_id == "experiment-1" and self.active_run_id is None
+        self.run_count += 1
+        self.active_run_id = "run-1"
         self.events.append("start")
-        self.tags = dict(kwargs.get("tags", {}))
-        return SimpleNamespace(info=SimpleNamespace(run_id="run-1"))
+        self.tags = dict(tags)
+        self.run_name = run_name
+        try:
+            yield SimpleNamespace(info=SimpleNamespace(run_id="run-1", experiment_id=experiment_id))
+        except BaseException:
+            self.end_run("FAILED")
+            raise
+        else:
+            self.end_run("FINISHED")
 
-    def log_artifact(self, run_id, path):
+    def end_run(self, status):
+        # MLflow clears its active run before sending the status update, even if it fails.
+        self.active_run_id = None
+        self.set_terminated("run-1", status)
+
+    def log_artifact(self, path, *, run_id=None):
         path = Path(path)
-        assert run_id == "run-1" and path.is_file()
+        assert (run_id or self.active_run_id) == "run-1" and path.is_file()
         self.events.append(f"upload {path.name}")
         if self.fail == "early upload" and path.name == "effective_config.json":
             raise OSError("configuration upload failed")
@@ -237,15 +271,16 @@ class RecordingClient:
             raise OSError("diagnostic upload failed")
         self.uploads[path.name] = path.read_bytes()
 
-    def log_param(self, run_id, key, value, **kwargs):
+    def log_param(self, key, value, **kwargs):
         assert kwargs["synchronous"] and isinstance(value, str)
         self.params[key] = value
 
-    def log_metric(self, run_id, key, value, **kwargs):
+    def log_metric(self, key, value, **kwargs):
         self.metrics[key] = value
         assert kwargs["synchronous"]
 
-    def log_artifacts(self, run_id, path):
+    def log_artifacts(self, path):
+        assert self.active_run_id == "run-1"
         self.events.append("all artifacts")
         assert (Path(path) / "compressed_model.pt").is_file()
         assert json.loads((Path(path) / "model_verification.json").read_text())["passed"]
@@ -254,17 +289,35 @@ class RecordingClient:
         self.uploads.update({p.name: p.read_bytes() for p in Path(path).iterdir() if p.is_file()})
 
     def set_terminated(self, run_id, status):
+        assert run_id == "run-1"
         self.events.append(status)
-        if self.fail in ("status update", "both"):
+        if self.fail in ("status update", "both") or (self.fail == "finish" and status == "FINISHED"):
             raise OSError("tracking connection lost")
 
 
 @pytest.fixture
-def execution(config_file, images, tmp_path, monkeypatch, request):
+def tracking(monkeypatch):
+    recording = RecordingMlflow()
+    for name in ("set_tracking_uri", "set_workspace", "set_experiment", "start_run",
+                 "log_param", "log_metric", "log_artifact", "log_artifacts"):
+        monkeypatch.setattr(f"mlflow.{name}", getattr(recording, name))
+
+    def failure_client(*, tracking_uri):
+        assert tracking_uri == recording.uri
+        return recording
+
+    monkeypatch.setattr("mlflow.MlflowClient", failure_client)
+    monkeypatch.setattr("socket.socket.connect", lambda *a, **k: pytest.fail("No tracking server in offline tests"))
+    return recording
+
+
+@pytest.fixture
+def execution(config_file, images, tmp_path, monkeypatch, request, tracking):
     from torchvision.transforms import ToTensor
 
     path, config = config_file
     baseline, layers = tiny_model()
+    config["tracking"]["uri"] = "https://configured.example.invalid"
     config["data"] = {"raw_dir": str(images[0]), "manifest": str(images[1])}
     config["compression"]["layers"] = layers
     config["runtime"].update(device=getattr(request, "param", "cpu"), batch_size=3, threads=1)
@@ -272,9 +325,8 @@ def execution(config_file, images, tmp_path, monkeypatch, request):
     config["output_root"] = str(tmp_path / "outputs")
     path.write_text(yaml.safe_dump(config))
     effective, original = runner.load_config(path)
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://tracking.example.invalid")
-    events = []
-    monkeypatch.setattr("mlflow.set_workspace", lambda workspace: events.append(f"workspace {workspace}"))
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://conflicting.example.invalid")
+    events = tracking.events
     monkeypatch.setattr(runner, "cached_weights", lambda: (None, {"identifier": "tiny fixture"}))
 
     def load(path, device):
@@ -295,7 +347,7 @@ def execution(config_file, images, tmp_path, monkeypatch, request):
 
 @pytest.mark.parametrize("execution", ["cpu", pytest.param("cuda:0", marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is unavailable"))], indirect=True)
-def test_complete_execution_tracks_before_loading_and_preserves_baseline(execution, capsys, monkeypatch):
+def test_complete_execution_tracks_before_loading_and_preserves_baseline(execution, capsys, monkeypatch, tracking):
     config, original, baseline, events = execution
     fingerprint = runner.model_fingerprint(baseline)
     device = torch.device(config["runtime"]["device"])
@@ -321,15 +373,18 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
 
     monkeypatch.setattr(runner, "evaluate", checked_evaluation)
     monkeypatch.setattr(runner, "measure_latency", checked_latency)
-    client = RecordingClient(events)
-    output = runner.run_experiment(config, original, client=client)
-    assert events == ["workspace quirc", "lookup experiment", "start", "upload effective_config.json", "upload original_config.yaml",
+    client = tracking
+    output = runner.run_experiment(config, original)
+    assert events == ["uri https://configured.example.invalid", "workspace quirc", "experiment model-compression", "start", "upload effective_config.json", "upload original_config.yaml",
                       "upload run.json", "upload source.json", "upload source.zip", "load baseline",
                       "upload evaluation_manifest.json", "upload provenance.json", "compress",
                       "all artifacts", "FINISHED"]
+    assert tracking.run_count == 1 and tracking.active_run_id is None
+    assert tracking.uri == config["tracking"]["uri"]
+    assert tracking.run_name == config["tracking"]["run_name"]
     run = json.loads(client.uploads["run.json"])
     assert run["workspace"] == "quirc"
-    assert json.loads(client.uploads["effective_config.json"])["tracking"]["workspace"] == "quirc"
+    assert json.loads(client.uploads["effective_config.json"])["tracking"] == config["tracking"]
     assert yaml.safe_load(client.uploads["original_config.yaml"])["tracking"]["workspace"] == "quirc"
     assert run["experiment_id"] == "experiment-1" and run["run_id"] == "run-1"
     printed = capsys.readouterr().out
@@ -369,52 +424,49 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
     assert verification["passed"] and verification["device"] == str(device)
 
 
-@pytest.mark.parametrize("failure", ["workspace", "lookup"])
-def test_workspace_is_selected_before_client_access_and_errors_do_not_fall_back(execution, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["workspace", "experiment"])
+def test_tracking_setup_errors_do_not_fall_back(execution, monkeypatch, tracking, failure):
     config, original, _, events = execution
     original_error = RuntimeError("workspace access denied")
 
-    def select(workspace):
-        events.append(f"workspace {workspace}")
-        if failure == "workspace":
-            raise original_error
-
-    def lookup(name):
-        events.append("lookup experiment")
+    def fail(value):
+        events.append(f"{failure} {value}")
         raise original_error
 
-    client = RecordingClient(events)
-    monkeypatch.setattr(client, "get_experiment_by_name", lookup)
-
-    def make_client(*, tracking_uri):
-        assert tracking_uri == "https://tracking.example.invalid"
-        events.append("client")
-        return client
-
-    monkeypatch.setattr("mlflow.set_workspace", select)
-    monkeypatch.setattr("mlflow.MlflowClient", make_client)
+    monkeypatch.setattr(f"mlflow.set_{failure}", fail)
     with pytest.raises(RuntimeError) as caught:
         runner.run_experiment(config, original)
     assert caught.value is original_error
-    expected = ["workspace quirc"]
-    if failure == "lookup":
-        expected += ["client", "lookup experiment"]
-    assert events == expected  # No alternate workspace, run creation, or model execution.
+    expected = ["uri https://configured.example.invalid", "workspace quirc"]
+    if failure == "experiment":
+        expected += ["experiment model-compression"]
+    assert events == expected
+    assert tracking.run_count == 0
     failure_path, = Path(config["output_root"]).glob("*/failure.json")
     assert json.loads(failure_path.read_text())["error"] == "workspace access denied"
 
 
+def test_environment_cannot_resume_an_existing_run(execution, monkeypatch, tracking):
+    config, original, _, events = execution
+    monkeypatch.setenv("MLFLOW_RUN_ID", "another-run")
+    with pytest.raises(ValueError, match="each execution must create a new run"):
+        runner.run_experiment(config, original)
+    assert events == [] and tracking.run_count == 0
+
+
 @pytest.mark.parametrize("failure", ["early upload", "conversion", "late upload"])
-def test_failures_preserve_cause_and_never_finish_a_run(execution, failure, monkeypatch):
+def test_failures_preserve_cause_and_never_finish_a_run(execution, failure, monkeypatch, tracking):
     config, original, baseline, events = execution
     fingerprint = runner.model_fingerprint(baseline)
-    client = RecordingClient(events, failure)
+    client = tracking
+    tracking.fail = failure
     if failure == "conversion":
         def fail(*args, **kwargs):
             raise RuntimeError("deliberate conversion failure")
         monkeypatch.setattr(tltorch, "compress_model", fail)
     with pytest.raises((RuntimeError, OSError), match="failure|failed"):
-        runner.run_experiment(config, original, client=client)
+        runner.run_experiment(config, original)
+    assert tracking.run_count == 1 and tracking.active_run_id is None
     assert events[-1] == "FAILED" and "FINISHED" not in events
     if failure == "early upload":
         assert "load baseline" not in events
@@ -438,11 +490,15 @@ def test_existing_output_is_not_overwritten(tmp_path):
     assert (first / "keep.txt").read_text() == "existing result"
 
 
-@pytest.mark.parametrize("address", ["", "sqlite:///mlflow.db", "file:///tmp/mlruns", "https://user:secret@server", "https://server?token=secret"])
-def test_tracking_requires_explicit_http_server_without_embedded_credentials(monkeypatch, address):
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", address)
-    with pytest.raises(ValueError, match="explicit HTTP"):
-        runner.tracking_address()
+@pytest.mark.parametrize("address", ["sqlite:///mlflow.db", "file:///tmp/mlruns", "https://user:secret@server",
+                                     "https://@server", "https://server?token=secret", "http://server:bad",
+                                     "http://[broken", "http://server:99999", "http://", "https://server/path with spaces"])
+def test_tracking_uri_validation_runs_without_tracking_requests(config_file, address):
+    path, config = config_file
+    config["tracking"]["uri"] = address
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match=r"tracking.uri must be an HTTP\(S\)"):
+        runner.load_config(path)
 
 
 def test_cli_returns_nonzero_after_execution_failure(config_file, monkeypatch):
@@ -455,18 +511,21 @@ def test_cli_returns_nonzero_after_execution_failure(config_file, monkeypatch):
 
 
 @pytest.mark.parametrize("tracking_failure", ["failure upload", "status update", "both"])
-def test_diagnostic_tracking_errors_do_not_hide_conversion_error(execution, monkeypatch, tracking_failure):
+def test_diagnostic_tracking_errors_do_not_hide_conversion_error(execution, monkeypatch, tracking_failure, tracking):
     config, original, _, events = execution
-    client = RecordingClient(events, fail=tracking_failure)
+    client = tracking
+    tracking.fail = tracking_failure
     original_error = RuntimeError("original conversion error")
+    cause = ValueError("invalid decomposition input")
 
     def fail_conversion(*args, **kwargs):
-        raise original_error
+        raise original_error from cause
 
     monkeypatch.setattr(tltorch, "compress_model", fail_conversion)
     with pytest.raises(RuntimeError) as caught:
-        runner.run_experiment(config, original, client=client)
-    assert caught.value is original_error
+        runner.run_experiment(config, original)
+    assert caught.value is original_error and caught.value.__cause__ is cause
+    assert tracking.run_count == 1 and tracking.active_run_id is None
     assert events[-2:] == ["upload failure.json", "FAILED"]
     assert "FINISHED" not in events
     failure_path, = Path(config["output_root"]).glob("*/failure.json")
@@ -479,7 +538,7 @@ def test_diagnostic_tracking_errors_do_not_hide_conversion_error(execution, monk
         assert "failure.json" not in client.uploads
 
 
-def test_serialization_failure_keeps_measurements_and_fails_the_run(execution, monkeypatch):
+def test_serialization_failure_keeps_measurements_and_fails_the_run(execution, monkeypatch, tracking):
     config, original, _, events = execution
 
     def fail_save(model, report, inputs, output):
@@ -487,12 +546,25 @@ def test_serialization_failure_keeps_measurements_and_fails_the_run(execution, m
         raise OSError("checkpoint write failed")
 
     monkeypatch.setattr(runner, "save_and_verify_model", fail_save)
-    client = RecordingClient(events)
+    client = tracking
     with pytest.raises(OSError, match="checkpoint write failed"):
-        runner.run_experiment(config, original, client=client)
+        runner.run_experiment(config, original)
+    assert tracking.run_count == 1 and tracking.active_run_id is None
     assert events[-1] == "FAILED" and "FINISHED" not in events
     assert "compressed_model.pt" not in client.uploads and "all artifacts" not in events
     assert len(list(Path(config["output_root"]).glob("*/results.csv"))) == 1
+
+
+def test_context_finish_failure_keeps_diagnostics_and_marks_the_same_run_failed(execution, tracking):
+    config, original, _, events = execution
+    tracking.fail = "finish"
+    with pytest.raises(OSError, match="tracking connection lost"):
+        runner.run_experiment(config, original)
+    assert events[-4:] == ["all artifacts", "FINISHED", "upload failure.json", "FAILED"]
+    assert tracking.run_count == 1 and tracking.active_run_id is None
+    failure_path, = Path(config["output_root"]).glob("*/failure.json")
+    assert tracking.uploads["failure.json"] == failure_path.read_bytes()
+    assert json.loads(failure_path.read_text())["error"] == "tracking connection lost"
 
 
 def test_missing_weights_explain_cache_setup_without_downloading(tmp_path, monkeypatch):
@@ -502,7 +574,7 @@ def test_missing_weights_explain_cache_setup_without_downloading(tmp_path, monke
         runner.cached_weights()
 
 
-def test_requested_parameters_keep_rank_meaning_and_supplied_controls(config_file):
+def test_requested_parameters_keep_rank_meaning_and_supplied_controls(config_file, tracking):
     path, config = config_file
     config["compression"]["layers"] = {
         "fc": {"factorization": "BlockTT", "rank": 1,
@@ -514,8 +586,8 @@ def test_requested_parameters_keep_rank_meaning_and_supplied_controls(config_fil
     }
     path.write_text(yaml.safe_dump(config))
     effective, _ = runner.load_config(path)
-    client = RecordingClient([])
-    runner.log_requested_settings(client, "run-1", effective)
+    client = tracking
+    runner.log_requested_settings(effective)
     assert client.params == {
         "model": "torchvision.resnet18", "weights": "ResNet18_Weights.IMAGENET1K_V1",
         "seed": "2026", "timing_seed": "2027", "device": "cuda:0", "dtype": "float32",
@@ -534,9 +606,10 @@ def test_requested_parameters_keep_rank_meaning_and_supplied_controls(config_fil
     }
     # YAML order must not change parameter strings or add library defaults.
     effective["compression"]["layers"] = dict(reversed(list(effective["compression"]["layers"].items())))
-    second = RecordingClient([])
-    runner.log_requested_settings(second, "run-1", effective)
-    assert second.params == client.params
+    first = dict(client.params)
+    client.params.clear()
+    runner.log_requested_settings(effective)
+    assert client.params == first
 
 
 def test_unavailable_cuda_is_rejected_without_cpu_fallback(monkeypatch):
