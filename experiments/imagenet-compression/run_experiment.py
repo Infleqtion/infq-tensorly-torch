@@ -23,12 +23,15 @@ import statistics
 import subprocess
 import sys
 import time
+import tempfile
 import traceback
 from urllib.parse import urlparse
 import uuid
 import zipfile
 
 import yaml
+
+from execution_inputs import snapshot_execution_inputs, verify_execution_inputs
 
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = EXPERIMENT_DIR.parents[1]
@@ -97,13 +100,22 @@ def load_config(path):
     """Return the effective configuration and original bytes; YAML paths use EXPERIMENT_DIR; the config filename uses the caller's directory."""
     original = Path(path).expanduser().read_bytes()
     config = yaml.load(original, Loader=UniqueSafeLoader)
-    _keys(config, ("model", "weights", "data", "compression", "runtime", "timing", "tracking", "output_root"), (), "configuration")
+    _keys(config, ("model", "weights", "data", "compression", "runtime", "timing", "tracking", "output_root"), ("cache",), "configuration")
     if config["model"] != "torchvision.resnet18" or config["weights"] != "ResNet18_Weights.IMAGENET1K_V1":
         raise ValueError("This runner supports torchvision.resnet18 with ResNet18_Weights.IMAGENET1K_V1")
     _keys(config["data"], ("raw_dir", "manifest"), (), "data")
     for key in ("raw_dir", "manifest"):
         config["data"][key] = str(experiment_path(config["data"][key]))
     config["output_root"] = str(experiment_path(config["output_root"]))
+    if "cache" in config:
+        _keys(config["cache"], ("torch_home",), (), "cache")
+        value = config["cache"]["torch_home"]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("cache.torch_home must be a nonempty path string")
+        try:
+            config["cache"]["torch_home"] = str(experiment_path(value))
+        except (ValueError, RuntimeError, OSError) as error:
+            raise ValueError(f"Invalid cache.torch_home: {error}") from error
 
     compression = config["compression"]
     _keys(compression, ("implementation", "layers"), (), "compression")
@@ -624,24 +636,21 @@ def run_directory_name():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
 
 
-def save_source(output):
-    """Archive an explicit code allowlist, including uncommitted contents, without data or credentials."""
-    experiment = EXPERIMENT_DIR.relative_to(REPOSITORY_ROOT)
-    files = ["setup.py", "pyproject.toml", "uv.lock", ".python-version"]
-    files += [str(experiment / name) for name in
-              ("run_experiment.py", "configs/resnet18_exploration.yaml", "README.md", "data/README.md")]
-    files += [path.relative_to(REPOSITORY_ROOT).as_posix() for path in (REPOSITORY_ROOT / "tltorch").rglob("*.py")
-              if "tests" not in path.relative_to(REPOSITORY_ROOT).parts]
-    hashes = {}
+def save_source(output, snapshot):
+    """Archive the exact committed execution scope, excluding deleted source files."""
+    hashes = snapshot["source_files_sha256"]
     with zipfile.ZipFile(output / "source.zip", "x", compression=zipfile.ZIP_DEFLATED) as archive:
-        for name in sorted(set(files)):
-            contents = (REPOSITORY_ROOT / name).read_bytes()
-            hashes[name] = hashlib.sha256(contents).hexdigest()
-            archive.writestr(name, contents)
-    revision = {"branch": git("branch", "--show-current").strip(),
-                "commit": git("rev-parse", "HEAD").strip(),
+        for name, digest in hashes.items():
+            if digest is not None:
+                contents = subprocess.check_output(
+                    ["git", "show", f"{snapshot['commit']}:{name}"], cwd=REPOSITORY_ROOT)
+                if hashlib.sha256(contents).hexdigest() != digest:
+                    raise RuntimeError(f"Committed source hash mismatch: {name}")
+                archive.writestr(name, contents)
+    revision = {**snapshot, "execution_inputs_match_commit": True,
+                "branch": git("branch", "--show-current").strip(),
                 "working_tree_status": git("status", "--short", "--untracked-files=all"),
-                "source_files_sha256": hashes, "source_archive_sha256": file_sha256(output / "source.zip")}
+                "source_archive_sha256": file_sha256(output / "source.zip")}
     write_json(output / "source.json", revision)
     return revision
 
@@ -700,6 +709,63 @@ def save_and_verify_model(model, report, inputs, output):
     return verification
 
 
+def log_and_verify_mlflow_model(model, report, inputs, output):
+    """Log the measured model as trusted pickle, then verify an independent reload."""
+    import torch
+    import mlflow.pytorch
+    from mlflow.models import infer_signature
+
+    before = model_fingerprint(model)
+    placement = [(t.device, t.dtype) for t in [*model.parameters(), *model.buffers()]]
+    modes = [module.training for module in model.modules()]
+    with torch.inference_mode():
+        expected = model(inputs).detach()
+    example = inputs.detach().cpu().numpy()
+    signature = infer_signature(example, expected.cpu().numpy())
+    packages = ("mlflow-skinny", "torch", "torchvision", "tensorly", "numpy", "scipy", "cloudpickle", "pandas")
+    requirements = [f"{name}=={importlib.metadata.version(name)}" for name in packages]
+    # Copy only importable library source, avoiding tests, caches, and editable-install paths.
+    with tempfile.TemporaryDirectory(prefix="compression-mlflow-") as temporary:
+        library = Path(temporary) / "tltorch"
+        source_names = git("ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "tltorch")
+        for name in sorted(set(source_names.split("\0")) - {""}):
+            source = REPOSITORY_ROOT / name
+            relative = source.relative_to(REPOSITORY_ROOT / "tltorch")
+            if source.suffix == ".py" and "tests" not in relative.parts and source.is_file():
+                destination = library / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(source.read_bytes())
+        info = mlflow.pytorch.log_model(
+            model, name="compressed_model", serialization_format="pickle",
+            input_example=example, signature=signature, pip_requirements=requirements,
+            code_paths=[str(library)],
+        )
+        metadata = {"model_uri": info.model_uri, "model_id": getattr(info, "model_id", None),
+                    "serialization_format": "pickle", "pip_requirements": requirements}
+        # Save the URI immediately, so a failed reload still leaves a usable diagnostic.
+        run = json.loads((output / "run.json").read_text())
+        run["mlflow_model"] = metadata
+        write_json(output / "run.json", run)
+        print(f"MLflow compressed model: {info.model_uri}", flush=True)
+        loaded = mlflow.pytorch.load_model(
+            info.model_uri, dst_path=temporary, map_location=inputs.device, weights_only=False)
+        if (model_fingerprint(loaded) != before
+                or layer_identity(loaded, report) != layer_identity(model, report)):
+            raise RuntimeError("MLflow model reload changed parameters, buffers, types, or ranks")
+        with torch.inference_mode():
+            actual = loaded(inputs)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+    if (model_fingerprint(model) != before
+            or placement != [(t.device, t.dtype) for t in [*model.parameters(), *model.buffers()]]
+            or modes != [module.training for module in model.modules()]):
+        raise RuntimeError("MLflow packaging changed the measured model's state, placement, or mode")
+    verification = {**metadata, "passed": True, "parameters_and_buffers_exact": True,
+                    "rtol": 1e-5, "atol": 1e-6, "device": str(inputs.device),
+                    "max_absolute_output_error": (actual - expected).abs().max().item()}
+    write_json(output / "mlflow_model_verification.json", verification)
+    return verification
+
+
 def validate_tracking_uri(address):
     """Require a configured HTTP(S) server; credentials stay in MLflow's own setup."""
     message = ("tracking.uri must be an HTTP(S) server URI without credentials, "
@@ -717,20 +783,33 @@ def validate_tracking_uri(address):
         raise ValueError(message)
 
 
+def configure_weight_cache(config):
+    """Apply an explicit cache only during execution; otherwise keep PyTorch's choice."""
+    import torch
+
+    torch_home = config.get("cache", {}).get("torch_home")
+    if torch_home is not None:
+        torch.hub.set_dir(str(Path(torch_home) / "hub"))
+    return {"torch_home": torch_home,
+            "hub_dir": str(Path(torch.hub.get_dir()).expanduser().resolve())}
+
+
 def cached_weights():
     import torch
 
     from torchvision.models import ResNet18_Weights
 
     weights = ResNet18_Weights.IMAGENET1K_V1
-    path = Path(torch.hub.get_dir()) / "checkpoints" / Path(urlparse(weights.url).path).name
+    path = Path(torch.hub.get_dir()).expanduser().resolve() / "checkpoints" / Path(urlparse(weights.url).path).name
     if not path.is_file():
         raise FileNotFoundError(f"Pretrained weights are missing at {path}. Follow the explicit weight-cache "
-                                "setup in experiments/imagenet-compression/README.md, or set TORCH_HOME to an existing cache.")
+                                "setup in experiments/imagenet-compression/README.md. Set cache.torch_home in YAML, "
+                                "or use TORCH_HOME when the cache section is absent.")
     digest = file_sha256(path)
     if not digest.startswith("f37072fd"):
         raise ValueError("Cached ResNet-18 weights do not match the published checksum prefix f37072fd")
-    return path, {"identifier": "ResNet18_Weights.IMAGENET1K_V1", "url": weights.url, "sha256": digest}
+    return path, {"identifier": "ResNet18_Weights.IMAGENET1K_V1", "url": weights.url, "sha256": digest,
+                  "checkpoint_path": str(path)}
 
 
 def load_cached_baseline(path, device):
@@ -790,7 +869,7 @@ def log_requested_settings(config):
         mlflow.log_param(key, encoded, synchronous=True)
 
 
-def run_experiment(config, original_config):
+def run_experiment(config, original_config, *, config_path):
     """Validate inputs, establish tracking, then load, compress, measure, save, and finish.
 
     Tests record the MLflow calls offline; execution requires the configured server.
@@ -802,6 +881,7 @@ def run_experiment(config, original_config):
     tracking = config["tracking"]
     validate_tracking_uri(tracking["uri"])
     manifest, manifest_bytes = read_manifest(config["data"]["raw_dir"], config["data"]["manifest"])
+    cache_info = configure_weight_cache(config)
     weight_path, weight_info = cached_weights()
     runtime, timing = config["runtime"], config["timing"]
     device = configure_runtime(runtime["device"], runtime["threads"])
@@ -820,17 +900,24 @@ def run_experiment(config, original_config):
     }
     run_id = None
     operation_error = None
+    revision = None
     try:
-        import mlflow
+        import mlflow.pytorch  # Check optional packaging dependencies before committing or tracking.
 
         # start_run otherwise treats this environment variable as a request to resume.
         if os.environ.get("MLFLOW_RUN_ID"):
             raise ValueError("Unset MLFLOW_RUN_ID: each execution must create a new run")
+        if mlflow.active_run() is not None:
+            raise ValueError("End the active MLflow run before starting this execution")
+        if load_config(config_path)[0] != config:
+            raise ValueError("Effective configuration differs from the selected YAML; reload it before execution")
+        snapshot = snapshot_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path,
+                                             original_config, tracking["run_name"])
+        revision = save_source(output, snapshot)
         mlflow.set_tracking_uri(tracking["uri"])
         mlflow.set_workspace(tracking["workspace"])
         experiment = mlflow.set_experiment(tracking["experiment_name"])
         experiment_id = experiment.experiment_id
-        revision = save_source(output)
         tags = {"tracking.workspace": tracking["workspace"], "git.branch": revision["branch"],
                 "git.commit": revision["commit"],
                 "git.dirty": str(bool(revision["working_tree_status"].strip())).lower()}
@@ -858,7 +945,7 @@ def run_experiment(config, original_config):
                 for package in ("mlflow-skinny", "PyYAML"):
                     environment["packages"][package] = importlib.metadata.version(package)
                 provenance = {"environment": environment, "git": revision, "model": config["model"],
-                              "weights": weight_info,
+                              "weights": weight_info, "cache": cache_info,
                               "preprocessing": {"description": str(preprocessing),
                                                 **{key: getattr(preprocessing, key, None) for key in
                                                    ("resize_size", "crop_size", "mean", "std", "antialias")},
@@ -904,6 +991,10 @@ def run_experiment(config, original_config):
                 (output / "report.md").write_text(results_table(rows) + "\n\n" + provenance["macro_metrics"] +
                                                   "\n\nFLOPs unavailable: " + FLOPS["reason"] + "\n")
                 save_and_verify_model(compressed, report, inputs, output)
+                verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
+                log_and_verify_mlflow_model(compressed, report, inputs, output)
+                verification = verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
+                write_json(output / "execution_inputs_verification.json", verification)
                 for row in rows:
                     for key, value in row.items():
                         if type(value) in (int, float) and math.isfinite(value):
@@ -911,6 +1002,7 @@ def run_experiment(config, original_config):
                 mlflow.log_metric("conversion_seconds", conversion_seconds, synchronous=True)
                 # The run remains open until checkpoint verification and every required upload succeed.
                 mlflow.log_artifacts(str(output))
+                verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
             except BaseException as error:
                 # MLflow's context exit can itself fail while updating run status.
                 operation_error = error
@@ -919,9 +1011,16 @@ def run_experiment(config, original_config):
     except BaseException as error:
         if operation_error is not None:
             error = operation_error
+        input_change_error = None
+        if revision is not None:
+            try:
+                verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
+            except Exception as changed:
+                input_change_error = str(changed)
+                print(f"Execution input verification failed: {changed}", file=sys.stderr)
         try:
             write_json(output / "failure.json", {"run_id": run_id, "error_type": type(error).__name__,
-                                                "error": str(error),
+                                                "error": str(error), "execution_input_error": input_change_error,
                                                 "traceback": "".join(traceback.format_exception(error))})
         except Exception:
             pass  # Diagnostic write failures must not hide the original failure.
@@ -1172,7 +1271,7 @@ def main(argv=None):
         if args.dry_run:
             print(describe(config))
             return 0
-        output = run_experiment(config, original)
+        output = run_experiment(config, original, config_path=args.config)
         print(f"Completed comparison; all required artifacts uploaded. Local files: {output}")
         return 0
     except Exception as error:

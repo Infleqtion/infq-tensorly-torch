@@ -1,6 +1,8 @@
 # Familiar settings for checking the workflow, not an optimized compression scheme.
 model: torchvision.resnet18
 weights: ResNet18_Weights.IMAGENET1K_V1
+cache:
+  torch_home: ~/.cache/tltorch-model-compression/torch
 data:
   raw_dir: data/raw/imagenetv2
   manifest: data/processed/imagenetv2/exploration.json

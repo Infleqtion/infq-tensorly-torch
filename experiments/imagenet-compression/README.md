@@ -149,7 +149,8 @@ the meaning of `data/raw/imagenetv2` inside the YAML.
 
 New output locations inside the repository must be ignored by Git;
 `results/runs/` under this experiment is the default. Each run gets a new timestamp/UUID directory; existing directories
-are never overwritten. A dirty checkout is allowed and does not trigger commits.
+are never overwritten. Real execution snapshots its selected code and YAML in a
+local commit before tracking; unrelated work may leave the checkout dirty.
 
 The dry run checks safe YAML syntax, duplicate/unknown options, supported runner
 settings, and path resolution. It prints the effective configuration. It does
@@ -214,9 +215,25 @@ diagnostic, never a partly written or unverified model.
 
 Prepare inputs using [data/README.md](data/README.md), and use the
 [explicit weight-cache setup](HISTORICAL-RUNS.md#explicit-downloads-and-image-use-guidance).
-`TORCH_HOME` may point to an existing cache containing
-`hub/checkpoints/resnet18-f37072fd.pth`. Execution loads that file directly and
-does not download missing weights. It validates every selected image's path,
+The maintained YAML selects the pretrained-weight cache directly:
+
+```yaml
+cache:
+  torch_home: ~/.cache/tltorch-model-compression/torch
+```
+
+Choose another existing cache by changing `cache.torch_home` in your selected
+configuration. This is the parent of `hub/`, so the expected file is
+`<torch_home>/hub/checkpoints/resnet18-f37072fd.pth`. `~` expands for the current
+user; relative cache paths resolve from this experiment directory, just like
+other YAML paths. An explicit YAML cache overrides `TORCH_HOME` and an existing
+PyTorch Hub override. With no `cache` section, PyTorch's existing resolution is
+preserved, including `TORCH_HOME` or a caller's `torch.hub.set_dir()` setting.
+Only real execution sets the Hub directory, before weight preflight and loading.
+Imports, configuration loading, preparation, help, and dry-run do not change it.
+The effective configuration saves the resolved explicit `torch_home`; provenance
+records the actual `cache.hub_dir` and `weights.checkpoint_path` in every run.
+Execution loads that file directly, checks its hash, and does not download missing weights. It validates every selected image's path,
 numeric folder label, and SHA-256. Missing, mismatched, or unreadable images fail
 the run rather than being skipped. The supplied manifest controls selection and
 order, with no one-or-ten-images-per-class restriction. Its seed is recorded as
@@ -248,11 +265,9 @@ Each output directory contains original/effective configuration, the exact
 manifest, a two-row CSV, a readable report, detailed measurements, raw timings,
 compression/storage/error reports, and provenance. Provenance includes manifest
 and cached-weight hashes, preprocessing, seeds, versions, hardware, backends,
-Git branch/commit/status, and a source archive. That archive uses an explicit
-allowlist of current runner/preparation/library code and environment files,
-including uncommitted contents and hashes. It excludes datasets, environments,
-historical runs, and unrelated personal files. It identifies the code beyond
-the commit hash; it is not an archive of the entire checkout.
+Git branch/commit/status, and a source archive. The archive contains the exact
+committed execution inputs described below, with per-file SHA-256 hashes. It
+excludes datasets, environments, historical runs, and unrelated personal files.
 
 `original_config_file_sha256` and `effective_config_file_sha256` identify the exact
 saved configuration files. They are recorded as MLflow parameters and in `run.json`
@@ -300,9 +315,98 @@ Use `device="cuda:0"` to load onto CUDA. These checks use the existing explicit
 `weights_only=False` trusted-model path,
 which does not depend on PyTorch's changed default. They do not promise general
 checkpoint portability across package versions. Source archives and Git provenance remain anchored to the repository root,
-independent of the caller's working directory. The archive includes the consolidated
-runner, example configuration, documentation, shared environment files, and library
-code; it excludes images, prepared manifests, caches, and result directories.
+independent of the caller's working directory. The archive and automatic commit
+use the same explicit execution scope.
+
+The runner also calls `mlflow.pytorch.log_model(..., name="compressed_model",
+serialization_format="pickle")` in the same active run, after checkpoint
+verification. MLflow 3.17.2 otherwise defaults to `.pt2` outside Databricks;
+the explicit pickle choice retains the actual factorized modules and weights.
+This logs a Model package and does not register a Model Registry entry. Its
+input example and signature describe the fixed synthetic timing input and model
+outputs. Exact installed requirements are recorded for MLflow skinny, pandas,
+cloudpickle, PyTorch, TorchVision, TensorLy, NumPy, and SciPy. Only TensorLy-Torch
+Python source is bundled under `code/tltorch/`; tests and caches are excluded.
+Pandas is an experiment dependency because MLflow's PyTorch flavor imports it.
+
+Packaging happens after accuracy and latency measurements. The measured model
+stays on its selected device and precision in evaluation mode. An independent
+MLflow reload must preserve parameters, buffers, factor types/ranks, and fixed-input
+predictions (`rtol=1e-5`, `atol=1e-6`). The runner records evidence in
+`mlflow_model_verification.json`, saves the returned URI and optional model ID in
+`run.json` under `mlflow_model`, and prints the URI. Logging or reload failures
+fail the run and retain the existing local/remote failure diagnostics. A remote
+Model package may remain after a failed verification; the run and its verification
+evidence determine whether it passed.
+
+To load a trusted package in its recorded environment, use the URI from `run.json`:
+
+```python
+import mlflow
+import mlflow.pytorch
+
+mlflow.set_tracking_uri("http://127.0.0.1:9361")
+mlflow.set_workspace("quirc")
+model = mlflow.pytorch.load_model(model_uri, map_location="cpu", weights_only=False)
+# Use map_location="cuda:0" to load onto the chosen GPU.
+```
+
+Loading uses the packaged `tltorch` code and does not repeat decomposition.
+Pickle packages require trusted artifacts and matching installed dependencies.
+Offline tests exercise MLflow's real save/load code with Tucker/BlockTT and
+TT/BlockTT models, including fresh processes. They do not establish server-side
+Model permissions or promise portability across arbitrary package versions.
+
+## Local execution commits
+
+After configuration, input/hash, cached-weight, runtime/device, and packaging-import
+checks, normal execution commits changed execution inputs. It does this before
+selecting the tracking server/workspace/experiment or creating a run. If the scope
+already matches HEAD, it reuses HEAD without an empty commit.
+
+The commit and `source.zip` scope is:
+
+- Trackable top-level Python files in `experiments/imagenet-compression/`, covering
+  the runner and its preparation, tracking, and comparison helpers.
+- Trackable `tltorch/**/*.py` files, excluding every `tests/` directory.
+- The selected original YAML, which must be a trackable `.yaml` or `.yml` under
+  `experiments/imagenet-compression/configs/`. Copy an external configuration there
+  before real execution. Other configurations are left alone; dry-run still accepts
+  an external YAML. This also preserves a separate TT configuration unless selected.
+- `setup.py`, `README.rst` (read by setup.py), `pyproject.toml`, `uv.lock`, and
+  `.python-version`.
+
+Selection includes relevant paths from HEAD, the index, and trackable working
+files, so staged and unstaged deletions and renames are included. The source
+archive omits deleted paths and stores the committed renamed contents. Images, manifests,
+weights, outputs, notebooks, tests, documentation other than the build README,
+credentials, caches, environments, and unrelated files are excluded. Do not put
+personal or generated code in the source directories; ignored files are excluded.
+The commit message is `experiment: snapshot code and configuration for <run_name>`.
+Git's path-limited commit preserves unrelated staged and unstaged changes, including
+a staged file with further unstaged edits. It may update staging for files within
+the execution scope. Hooks run normally. Resolve missing identity, failing hooks,
+index locks, or conflicts manually if Git cannot commit; no tracking run or model
+execution starts on that failure. A hook that changes the scoped content or adds
+files outside scope causes verification to fail and requires manual review of any
+commit already created. The runner never stashes, amends, switches branches,
+configures identity, or pushes.
+
+`source.json` records the commit, selected configuration path, source-file hashes,
+and `execution_inputs_match_commit`, separately from the actual repository-wide
+dirty status. Unrelated changes can keep `git.dirty=true`. The source archive reads
+the recorded commit, and the saved original YAML must match its committed bytes.
+The exact effective configuration, installed environment, manifests, and weight
+hashes remain necessary: a Git commit does not capture those external inputs.
+
+The runner checks scoped contents again before packaging, after package verification,
+and after final uploads. Changed or newly added execution inputs fail the run;
+`failure.json` records the input error without hiding a concurrent original failure.
+`execution_inputs_verification.json` records successful verification. These checks
+compare on-disk content at those points; they are not a filesystem lock or proof
+against a change that was made and reverted between checks. Avoid editing execution
+inputs while a run is active. Commits stay local: push them later or transfer a Git
+bundle so another machine can recover the recorded revision.
 
 Run offline validation without pretrained models, downloads, or a tracking server.
 CUDA cases run when a GPU is available and skip otherwise; the CPU cases still run:
@@ -327,7 +431,35 @@ succeeded for `quirc`. Creating experiments/runs and uploading/downloading
 artifacts still await the first real comparison. Browser login alone does not
 verify the Python client's access.
 
-Prepare the dedicated environment once using the existing lockfile:
+After this implementation is reviewed and committed, transfer that exact commit
+by a normal SSH push/fetch or a Git bundle and fast-forward the clean dedicated
+checkout. This preparation step has not deployed it. If Cheetah still cannot fetch
+GitHub over SSH, prepare a bundle locally after committing the reviewed changes:
+
+```bash
+cd /home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression
+git rev-parse rafael/exp  # Record this exact reviewed commit for the remote check.
+git bundle create /tmp/imagenet-compression-update.bundle rafael/exp ^c4980d7a93ceab243329c2266359420e1a2f19f8
+scp -o ClearAllForwardings=yes /tmp/imagenet-compression-update.bundle cheetah:/tmp/
+```
+
+On Cheetah, first confirm `rafael/exp` and a clean working tree. Stop and preserve
+any unexpected work or divergence. Then verify the bundle and fast-forward:
+
+```bash
+cd /home/rafael/projects/infq-tensorly-torch
+git branch --show-current
+git status --short --untracked-files=all
+git bundle verify /tmp/imagenet-compression-update.bundle
+git fetch /tmp/imagenet-compression-update.bundle refs/heads/rafael/exp:refs/remotes/origin/rafael/exp
+git merge --ff-only origin/rafael/exp
+git rev-parse HEAD  # Must equal the reviewed local commit recorded above.
+```
+
+This preserves the GitHub SSH remote and upstream. The bundle requires the last
+transferred commit `c4980d7…`, so it is for the existing dedicated checkout.
+Keep existing prepared data and cached weights. Synchronize the environment
+from the updated lockfile (pandas is required for Model packaging):
 
 ```bash
 cd /home/rafael/projects/infq-tensorly-torch
@@ -338,21 +470,32 @@ This installs the default development group and experiment dependencies without
 notebook or plotting groups. Keep the copied raw images under
 `experiments/imagenet-compression/data/raw/imagenetv2/` and the unchanged four
 prepared files under `data/processed/imagenetv2/` in that experiment directory.
-Use `$HOME/.cache/tltorch-model-compression/torch` for the matching cached weight
-file. Transfer and hash-check these existing inputs; do not regenerate selections.
-`TORCH_HOME` is PyTorch's weight-cache setting and remains separate from MLflow;
-its behavior and the export below are unchanged.
+The maintained YAML's `cache.torch_home` resolves to
+`/home/rafael/.cache/tltorch-model-compression/torch` for Cheetah's `rafael` user.
+Its checkpoint path remains
+`/home/rafael/.cache/tltorch-model-compression/torch/hub/checkpoints/resnet18-f37072fd.pth`,
+the previously prepared location. This is a path-consistency check, not a new
+remote existence or hash check. No cache export is required. Change the YAML
+setting to use another existing cache. Keep the existing weights and prepared
+selections; this setup does not move or download them.
 
 For a readiness check, run only:
 
 ```bash
 cd /home/rafael/projects/infq-tensorly-torch
-export TORCH_HOME="$HOME/.cache/tltorch-model-compression/torch"
 /home/rafael/.local/bin/uv run --no-sync python experiments/imagenet-compression/run_experiment.py --config experiments/imagenet-compression/configs/resnet18_exploration.yaml --dry-run
 ```
 
-After checking available GPU capacity, manually start the comparison by removing
-`--dry-run` from that last command. The YAML selects `cuda:0`, evaluation batches
+After checking available GPU capacity and reviewing pending source/configuration
+changes, manually start the comparison with:
+
+```bash
+cd /home/rafael/projects/infq-tensorly-torch
+/home/rafael/.local/bin/uv run --no-sync python experiments/imagenet-compression/run_experiment.py --config experiments/imagenet-compression/configs/resnet18_exploration.yaml
+```
+
+This command may create a local execution-input commit, then starts one tracked run.
+A Git commit failure stops it before tracking or model execution. The YAML selects `cuda:0`, evaluation batches
 of 16, four CPU threads, and the original 1,000 exploration images. Compression
 and timing settings are unchanged. Cheetah has two RTX 6000 Ada GPUs; device
 visibility can change their logical numbering, so verify the physical GPU before

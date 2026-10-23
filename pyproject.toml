@@ -17,6 +17,8 @@ dev = [
 ]
 experiments = [
     "mlflow-skinny>=3,<4",
+    # MLflow's PyTorch model flavor imports pandas, which skinny does not include.
+    "pandas>=2,<4",
     "pillow==12.3.0",
     "pyyaml>=6,<7",
     "torchvision==0.22.1",

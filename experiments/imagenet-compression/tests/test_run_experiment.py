@@ -23,6 +23,12 @@ import tltorch
 from tltorch import compress_model
 
 
+@pytest.fixture(autouse=True)
+def restore_hub_cache(monkeypatch):
+    """torch.hub.set_dir changes a global value; restore it after every test."""
+    monkeypatch.setattr(torch.hub, "_hub_dir", torch.hub._hub_dir)
+
+
 @pytest.fixture
 def config_file(tmp_path):
     config = yaml.safe_load((runner.EXPERIMENT_DIR / "configs/resnet18_exploration.yaml").read_text())
@@ -296,8 +302,29 @@ class RecordingMlflow:
 
 
 @pytest.fixture
-def tracking(monkeypatch):
+def tracking(monkeypatch, tmp_path):
+    import mlflow.pytorch
     recording = RecordingMlflow()
+    save_model, load_model = mlflow.pytorch.save_model, mlflow.pytorch.load_model
+
+    def log_model(model, **kwargs):
+        assert recording.active_run_id == "run-1"
+        recording.events.append("log compressed model")
+        if recording.fail == "model logging":
+            raise RuntimeError("MLflow model logging failed")
+        assert kwargs.pop("name") == "compressed_model"
+        package = tmp_path / "mlflow-package"
+        save_model(model, str(package), **kwargs)
+        return SimpleNamespace(model_uri=str(package), model_id="model-1")
+
+    def reload_model(*args, **kwargs):
+        recording.events.append("reload compressed model")
+        if recording.fail == "model verification":
+            raise RuntimeError("MLflow model reload failed")
+        return load_model(*args, **kwargs)
+
+    monkeypatch.setattr(mlflow.pytorch, "log_model", log_model)
+    monkeypatch.setattr(mlflow.pytorch, "load_model", reload_model)
     for name in ("set_tracking_uri", "set_workspace", "set_experiment", "start_run",
                  "log_param", "log_metric", "log_artifact", "log_artifacts"):
         monkeypatch.setattr(f"mlflow.{name}", getattr(recording, name))
@@ -312,10 +339,14 @@ def tracking(monkeypatch):
 
 
 @pytest.fixture
-def execution(config_file, images, tmp_path, monkeypatch, request, tracking):
+def execution(config_file, images, tmp_path, monkeypatch, request, tracking, execution_repo):
     from torchvision.transforms import ToTensor
 
-    path, config = config_file
+    _, config = config_file
+    repository, experiment = execution_repo
+    monkeypatch.setattr(runner, "REPOSITORY_ROOT", repository)
+    monkeypatch.setattr(runner, "EXPERIMENT_DIR", experiment)
+    path = experiment / "configs/test.yaml"
     baseline, layers = tiny_model()
     config["tracking"]["uri"] = "https://configured.example.invalid"
     config["data"] = {"raw_dir": str(images[0]), "manifest": str(images[1])}
@@ -323,13 +354,21 @@ def execution(config_file, images, tmp_path, monkeypatch, request, tracking):
     config["runtime"].update(device=getattr(request, "param", "cpu"), batch_size=3, threads=1)
     config["timing"].update(input_shape=[1, 3, 4, 4], warmup=1, repeats=2)
     config["output_root"] = str(tmp_path / "outputs")
+    config["cache"] = {"torch_home": str(tmp_path / "configured-torch")}
     path.write_text(yaml.safe_dump(config))
     effective, original = runner.load_config(path)
     monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://conflicting.example.invalid")
     events = tracking.events
-    monkeypatch.setattr(runner, "cached_weights", lambda: (None, {"identifier": "tiny fixture"}))
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "conflicting-cache"))
+    hub = Path(effective["cache"]["torch_home"]) / "hub"
+    weight_path = hub / "checkpoints/resnet18-f37072fd.pth"
+    def weights():
+        assert Path(torch.hub.get_dir()) == hub  # Configure before preflight.
+        return weight_path, {"identifier": "tiny fixture", "checkpoint_path": str(weight_path)}
+    monkeypatch.setattr(runner, "cached_weights", weights)
 
     def load(path, device):
+        assert path == weight_path and Path(torch.hub.get_dir()) == hub
         events.append("load baseline")
         return baseline.to(device), ToTensor()
 
@@ -374,11 +413,11 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
     monkeypatch.setattr(runner, "evaluate", checked_evaluation)
     monkeypatch.setattr(runner, "measure_latency", checked_latency)
     client = tracking
-    output = runner.run_experiment(config, original)
+    output = runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert events == ["uri https://configured.example.invalid", "workspace quirc", "experiment model-compression", "start", "upload effective_config.json", "upload original_config.yaml",
                       "upload run.json", "upload source.json", "upload source.zip", "load baseline",
                       "upload evaluation_manifest.json", "upload provenance.json", "compress",
-                      "all artifacts", "FINISHED"]
+                      "log compressed model", "reload compressed model", "all artifacts", "FINISHED"]
     assert tracking.run_count == 1 and tracking.active_run_id is None
     assert tracking.uri == config["tracking"]["uri"]
     assert tracking.run_name == config["tracking"]["run_name"]
@@ -387,6 +426,9 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
     assert json.loads(client.uploads["effective_config.json"])["tracking"] == config["tracking"]
     assert yaml.safe_load(client.uploads["original_config.yaml"])["tracking"]["workspace"] == "quirc"
     assert run["experiment_id"] == "experiment-1" and run["run_id"] == "run-1"
+    assert run["mlflow_model"]["model_id"] == "model-1"
+    assert json.loads(client.uploads["mlflow_model_verification.json"])["passed"]
+    assert json.loads(client.uploads["execution_inputs_verification.json"])["matches_recorded_commit"]
     printed = capsys.readouterr().out
     assert "quirc" in printed and "experiment-1" in printed and "run-1" in printed and str(output) in printed
     source = json.loads(client.uploads["source.json"])
@@ -395,6 +437,10 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
                            "git.commit": runner.git("rev-parse", "HEAD").strip(),
                            "git.dirty": str(bool(source["working_tree_status"].strip())).lower()}
     provenance = json.loads(client.uploads["provenance.json"])
+    assert provenance["cache"] == {"torch_home": config["cache"]["torch_home"],
+                                   "hub_dir": str(Path(config["cache"]["torch_home"]) / "hub")}
+    assert provenance["weights"]["checkpoint_path"] == str(
+        Path(provenance["cache"]["hub_dir"]) / "checkpoints/resnet18-f37072fd.pth")
     # The fixture uses a custom YAML, so hashing the repository example would be wrong.
     assert original != (runner.EXPERIMENT_DIR / "configs/resnet18_exploration.yaml").read_bytes()
     for filename, key in (("original_config.yaml", "original_config_file_sha256"),
@@ -412,7 +458,13 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
     with zipfile.ZipFile(output / "source.zip") as archive:
         names = archive.namelist()
         assert "experiments/imagenet-compression/run_experiment.py" in names
-        assert "experiments/imagenet-compression/configs/resnet18_exploration.yaml" in names
+        assert "experiments/imagenet-compression/configs/test.yaml" in names
+        assert source["execution_inputs_match_commit"]
+        for name in names:
+            contents = archive.read(name)
+            assert hashlib.sha256(contents).hexdigest() == source["source_files_sha256"][name]
+            assert contents == subprocess.check_output(
+                ["git", "show", f"{source['commit']}:{name}"], cwd=runner.REPOSITORY_ROOT)
         assert not any(n.startswith(("experiments/imagenet-compression/data/raw/",
                                                 "experiments/imagenet-compression/data/processed/",
                                                 ".venv/", "experiments/imagenet-compression/results/")) for n in names)
@@ -435,7 +487,7 @@ def test_tracking_setup_errors_do_not_fall_back(execution, monkeypatch, tracking
 
     monkeypatch.setattr(f"mlflow.set_{failure}", fail)
     with pytest.raises(RuntimeError) as caught:
-        runner.run_experiment(config, original)
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert caught.value is original_error
     expected = ["uri https://configured.example.invalid", "workspace quirc"]
     if failure == "experiment":
@@ -450,7 +502,7 @@ def test_environment_cannot_resume_an_existing_run(execution, monkeypatch, track
     config, original, _, events = execution
     monkeypatch.setenv("MLFLOW_RUN_ID", "another-run")
     with pytest.raises(ValueError, match="each execution must create a new run"):
-        runner.run_experiment(config, original)
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert events == [] and tracking.run_count == 0
 
 
@@ -465,7 +517,7 @@ def test_failures_preserve_cause_and_never_finish_a_run(execution, failure, monk
             raise RuntimeError("deliberate conversion failure")
         monkeypatch.setattr(tltorch, "compress_model", fail)
     with pytest.raises((RuntimeError, OSError), match="failure|failed"):
-        runner.run_experiment(config, original)
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert tracking.run_count == 1 and tracking.active_run_id is None
     assert events[-1] == "FAILED" and "FINISHED" not in events
     if failure == "early upload":
@@ -504,7 +556,7 @@ def test_tracking_uri_validation_runs_without_tracking_requests(config_file, add
 def test_cli_returns_nonzero_after_execution_failure(config_file, monkeypatch):
     import run_experiment
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("deliberate execution failure")
     monkeypatch.setattr(runner, "run_experiment", fail)
     assert run_experiment.main(["--config", str(config_file[0])]) == 1
@@ -523,7 +575,7 @@ def test_diagnostic_tracking_errors_do_not_hide_conversion_error(execution, monk
 
     monkeypatch.setattr(tltorch, "compress_model", fail_conversion)
     with pytest.raises(RuntimeError) as caught:
-        runner.run_experiment(config, original)
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert caught.value is original_error and caught.value.__cause__ is cause
     assert tracking.run_count == 1 and tracking.active_run_id is None
     assert events[-2:] == ["upload failure.json", "FAILED"]
@@ -548,7 +600,7 @@ def test_serialization_failure_keeps_measurements_and_fails_the_run(execution, m
     monkeypatch.setattr(runner, "save_and_verify_model", fail_save)
     client = tracking
     with pytest.raises(OSError, match="checkpoint write failed"):
-        runner.run_experiment(config, original)
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert tracking.run_count == 1 and tracking.active_run_id is None
     assert events[-1] == "FAILED" and "FINISHED" not in events
     assert "compressed_model.pt" not in client.uploads and "all artifacts" not in events
@@ -559,7 +611,7 @@ def test_context_finish_failure_keeps_diagnostics_and_marks_the_same_run_failed(
     config, original, _, events = execution
     tracking.fail = "finish"
     with pytest.raises(OSError, match="tracking connection lost"):
-        runner.run_experiment(config, original)
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert events[-4:] == ["all artifacts", "FINISHED", "upload failure.json", "FAILED"]
     assert tracking.run_count == 1 and tracking.active_run_id is None
     failure_path, = Path(config["output_root"]).glob("*/failure.json")
@@ -678,3 +730,220 @@ def test_same_cuda_checkpoint_loads_on_cpu_and_cuda(tmp_path, monkeypatch):
     # Identical float32 weights may accumulate in different orders on CPU and CUDA.
     # Use the existing checkpoint forward tolerance, not factor-by-factor decomposition equality.
     torch.testing.assert_close(outputs[0], outputs[1], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("failure", ["model logging", "model verification"])
+def test_mlflow_model_errors_keep_failure_record_and_never_finish(execution, tracking, failure):
+    config, original, baseline, events = execution
+    tracking.fail = failure
+    before = runner.model_fingerprint(baseline)
+    with pytest.raises(RuntimeError, match="MLflow model"):
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
+    assert "FINISHED" not in events and events[-2:] == ["upload failure.json", "FAILED"]
+    assert "failure.json" in tracking.uploads and "all artifacts" not in events
+    assert "model_verification.json" not in tracking.uploads  # No final artifact batch.
+    assert runner.model_fingerprint(baseline) == before
+
+
+def test_commit_failure_prevents_any_tracking_or_model_execution(execution):
+    config, original, _, events = execution
+    hook = runner.REPOSITORY_ROOT / ".git/hooks/pre-commit"
+    hook.write_text("#!/bin/sh\necho 'review required' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    with pytest.raises(RuntimeError, match="Cannot safely snapshot.*review required"):
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
+    assert events == []
+    failure, = Path(config["output_root"]).glob("*/failure.json")
+    assert json.loads(failure.read_text())["run_id"] is None
+
+
+def test_modified_execution_source_is_reported_without_hiding_original_failure(execution, monkeypatch, tracking):
+    config, original, _, events = execution
+    original_error = ValueError("decomposition failed")
+    def fail(*args, **kwargs):
+        (runner.EXPERIMENT_DIR / "new_helper.py").write_text("changed = True\n")
+        raise original_error
+    monkeypatch.setattr(tltorch, "compress_model", fail)
+    with pytest.raises(ValueError) as caught:
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
+    assert caught.value is original_error
+    failure = json.loads(tracking.uploads["failure.json"])
+    assert "new_helper.py" in failure["execution_input_error"]
+    assert events[-1] == "FAILED"
+
+
+@pytest.mark.parametrize("factorization", ["Tucker", "TT"])
+def test_real_mlflow_package_contains_code_and_reloads_in_fresh_process(tmp_path, monkeypatch, tracking, factorization):
+    model, layers = tiny_model()
+    if factorization == "TT":
+        layers["0"] = {"factorization": "TT", "rank": 2}
+    compressed, report = compress_model(model, layers)
+    inputs = torch.arange(48, dtype=torch.float32).reshape(1, 3, 4, 4) / 48
+    before = runner.model_fingerprint(compressed)
+    modes = [m.training for m in compressed.modules()]
+    runner.write_json(tmp_path / "run.json", {"run_id": "run-1"})
+    runner.save_and_verify_model(compressed, report, inputs, tmp_path)
+    tracking.active_run_id = "run-1"
+    check = runner.log_and_verify_mlflow_model(compressed, report, inputs, tmp_path)
+    assert check["passed"] and check["model_id"] == "model-1"
+    assert runner.model_fingerprint(compressed) == before
+    assert [m.training for m in compressed.modules()] == modes
+    assert all(t.device.type == "cpu" and t.dtype == torch.float32
+               for t in [*compressed.parameters(), *compressed.buffers()])
+    package = Path(check["model_uri"])
+    metadata = yaml.safe_load((package / "MLmodel").read_text())
+    assert metadata["signature"]["inputs"] and metadata["signature"]["outputs"]
+    assert (package / "input_example.json").is_file()
+    assert not list(package.rglob("*.pt2"))
+    assert (package / "code/tltorch/__init__.py").is_file()
+    assert not any("tests" in path.parts or "__pycache__" in path.parts
+                   for path in (package / "code").rglob("*"))
+    assert "tensorly==0.9.0" in (package / "requirements.txt").read_text()
+    code = """
+from pathlib import Path
+import sys
+from unittest.mock import patch
+import torch
+import mlflow.pytorch
+with patch("socket.socket.connect", side_effect=AssertionError("offline")):
+    model = mlflow.pytorch.load_model(sys.argv[1], map_location="cpu", weights_only=False)
+    import tltorch
+    assert Path(tltorch.__file__).is_relative_to(Path(sys.argv[1]) / "code")
+    with patch("tltorch.compress_model", side_effect=AssertionError("no decomposition")):
+        check = torch.load(sys.argv[2], weights_only=True)
+        with torch.inference_mode():
+            torch.testing.assert_close(model(check["inputs"]), check["expected_outputs"], rtol=1e-5, atol=1e-6)
+"""
+    subprocess.run([sys.executable, "-B", "-c", code, str(package), str(tmp_path / "verification_input.pt")],
+                   cwd=tmp_path, check=True)
+
+
+def test_new_source_and_selected_yaml_are_committed_before_tracking(execution, monkeypatch, tracking):
+    config, original, _, events = execution
+    helper = runner.EXPERIMENT_DIR / "new_helper.py"
+    helper.write_text("value = 5\n")
+    selected = runner.EXPERIMENT_DIR / "configs/test.yaml"
+    before = runner.git("rev-parse", "HEAD").strip()
+    select_uri = tracking.set_tracking_uri
+    def check_commit(uri):
+        assert runner.git("rev-parse", "HEAD").strip() != before
+        assert runner.git("show", "HEAD:experiments/imagenet-compression/new_helper.py") == helper.read_text()
+        committed_yaml = subprocess.check_output(
+            ["git", "show", "HEAD:experiments/imagenet-compression/configs/test.yaml"], cwd=runner.REPOSITORY_ROOT)
+        assert committed_yaml == original
+        select_uri(uri)
+    monkeypatch.setattr("mlflow.set_tracking_uri", check_commit)
+    output = runner.run_experiment(config, original, config_path=selected)
+    assert json.loads((output / "source.json").read_text())["commit"] == runner.git("rev-parse", "HEAD").strip()
+    assert events[-1] == "FINISHED"
+
+
+def test_source_change_during_final_upload_prevents_success(execution, monkeypatch, tracking):
+    config, original, _, events = execution
+    upload = tracking.log_artifacts
+    def change_after_upload(path):
+        upload(path)
+        (runner.EXPERIMENT_DIR / "new_helper.py").write_text("changed = True\n")
+    monkeypatch.setattr("mlflow.log_artifacts", change_after_upload)
+    with pytest.raises(RuntimeError, match="changed after the recorded commit.*new_helper.py"):
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
+    assert "FINISHED" not in events
+    assert "new_helper.py" in json.loads(tracking.uploads["failure.json"])["execution_input_error"]
+
+
+@pytest.mark.parametrize("change,message", [
+    (None, "cache must be a mapping"),
+    ({}, "cache: missing options.*torch_home"),
+    ({"torch_home": "cache", "unknown": 1}, "cache:.*unknown options.*unknown"),
+    ({"torch_home": None}, "cache.torch_home must be a nonempty path string"),
+    ({"torch_home": 7}, "cache.torch_home must be a nonempty path string"),
+    ({"torch_home": "  "}, "cache.torch_home must be a nonempty path string"),
+    ({"torch_home": "bad\x00path"}, "Invalid cache.torch_home"),
+])
+def test_invalid_cache_settings_fail_during_configuration_loading(config_file, change, message):
+    path, config = config_file
+    config["cache"] = change
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match=message):
+        runner.load_config(path)
+
+
+@pytest.mark.parametrize("configured", ["~/.cache/tltorch-model-compression/torch", "other-cache/torch"])
+def test_cache_path_resolution_is_pure_and_uses_home_or_experiment_directory(config_file, configured, monkeypatch):
+    path, config = config_file
+    config["cache"] = {"torch_home": configured}
+    path.write_text(yaml.safe_dump(config))
+    original_hub = torch.hub.get_dir()
+    monkeypatch.setattr(torch.hub, "set_dir", lambda *a: pytest.fail("Configuration loading must not set the cache"))
+    effective, _ = runner.load_config(path)
+    expected = (Path.home() / configured[2:] if configured.startswith("~/")
+                else runner.EXPERIMENT_DIR / configured)
+    assert effective["cache"]["torch_home"] == str(expected.resolve())
+    assert torch.hub.get_dir() == original_hub
+
+
+@pytest.mark.parametrize("ambient", [None, "conflicting-torch-home"])
+def test_explicit_yaml_cache_wins_before_cached_weight_checks(config_file, tmp_path, monkeypatch, ambient):
+    path, config = config_file
+    config["cache"] = {"torch_home": str(tmp_path / "selected-cache")}
+    path.write_text(yaml.safe_dump(config))
+    if ambient is None:
+        monkeypatch.delenv("TORCH_HOME", raising=False)
+    else:
+        monkeypatch.setenv("TORCH_HOME", str(tmp_path / ambient))
+    # An existing explicit Hub override must also yield to the selected YAML.
+    torch.hub.set_dir(str(tmp_path / "old-hub"))
+    effective, _ = runner.load_config(path)
+    cache = runner.configure_weight_cache(effective)
+    hub = tmp_path / "selected-cache/hub"
+    assert torch.hub.get_dir() == str(hub)
+    assert cache == {"torch_home": str(hub.parent), "hub_dir": str(hub)}
+    monkeypatch.setattr(torch.hub, "load_state_dict_from_url", lambda *a, **k: pytest.fail("No download"))
+    with pytest.raises(FileNotFoundError) as caught:
+        runner.cached_weights()
+    assert str(hub / "checkpoints/resnet18-f37072fd.pth") in str(caught.value)
+    assert "cache.torch_home" in str(caught.value)
+    # Hash the small stand-in without loading a model or relaxing checksum validation.
+    checkpoint = hub / "checkpoints/resnet18-f37072fd.pth"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"synthetic checkpoint bytes")
+    with pytest.raises(ValueError, match="published checksum"):
+        runner.cached_weights()
+    monkeypatch.setattr(runner, "file_sha256", lambda p: "f37072fd" + "0" * 56)
+    actual, provenance = runner.cached_weights()
+    assert actual == checkpoint and provenance["checkpoint_path"] == str(checkpoint)
+
+
+@pytest.mark.parametrize("explicit_hub", [False, True])
+def test_absent_cache_section_preserves_pytorch_resolution(config_file, tmp_path, monkeypatch, explicit_hub):
+    path, config = config_file
+    config.pop("cache", None)
+    path.write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "environment-cache"))
+    monkeypatch.setattr(torch.hub, "_hub_dir", str(tmp_path / "caller-hub") if explicit_hub else None)
+    effective, _ = runner.load_config(path)
+    before = torch.hub.get_dir()
+    cache = runner.configure_weight_cache(effective)
+    assert "cache" not in effective
+    assert torch.hub.get_dir() == before
+    assert cache == {"torch_home": None, "hub_dir": str(Path(before).resolve())}
+    expected = tmp_path / ("caller-hub" if explicit_hub else "environment-cache/hub")
+    assert Path(before) == expected
+
+
+def test_nonexecution_commands_do_not_change_global_hub_cache(config_file, tmp_path, monkeypatch):
+    path, _ = config_file
+    torch.hub.set_dir(str(tmp_path / "caller-hub"))
+    before = torch.hub.get_dir()
+    def forbidden(*args, **kwargs):
+        pytest.fail("Nonexecution commands must not set the cache or contact tracking")
+    monkeypatch.setattr(torch.hub, "set_dir", forbidden)
+    monkeypatch.setattr("socket.socket.connect", forbidden)
+    runner.load_config(path)
+    assert runner.main(["--config", str(path), "--dry-run"]) == 0
+    monkeypatch.setattr(runner, "prepare_data", lambda *a, **k: {"splits": {}})
+    assert runner.main(["--prepare-data"]) == 0
+    with pytest.raises(SystemExit) as caught:
+        runner.main(["--help"])
+    assert caught.value.code == 0
+    assert torch.hub.get_dir() == before

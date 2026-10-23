@@ -188,7 +188,12 @@ Shared `pyproject.toml`, `uv.lock`, `.python-version`, the uv environment, and
 The [README](README.md#prepare-once-then-run-a-configuration) gives detailed commands.
 
 Preparation is an explicit action. Normal execution consumes existing manifests
-and cached weights; it does not generate selections or download inputs. One YAML
+and cached weights; it does not generate selections or download inputs. The optional
+cache.torch_home YAML setting chooses the parent of hub/, with home expansion and
+experiment-relative path resolution. Explicit YAML overrides TORCH_HOME; omitting
+it keeps PyTorch's prior behavior. Only real execution changes the Hub directory,
+before weight checks and loading. Effective configuration and provenance retain
+the resolved cache and checkpoint paths. One YAML
 describes one compressed configuration and its measured dense baseline on the
 same partition. It can be executed repeatedly: each execution creates a unique
 run ID and local output directory, saving the exact original and effective
@@ -291,10 +296,25 @@ environment/input provenance, and source artifacts accompany each run. The
 effective configuration resolves absolute paths; its SHA-256 identifies that
 exact file, not a machine-independent definition of an equivalent experiment.
 
-Current Git provenance records the actual branch, commit, working-tree status,
-and hashes of an explicitly selected source archive, including uncommitted code.
-A commit hash alone does not identify a dirty checkout. The runner permits dirty
-work and does not create commits. This plan does not settle a future Git policy.
+Before normal execution contacts tracking, practical preflight checks run and
+changed execution inputs are committed locally. An unchanged scope reuses HEAD.
+The scope is top-level experiment Python helpers, library Python source excluding
+tests, the selected original YAML under this experiment's configs/, and shared
+setup.py, README.rst, pyproject.toml, uv.lock, and .python-version. New scoped files
+and deletions are included; unrelated staging and working changes are preserved.
+Dry-run, preparation, help, and imports never commit. Git identity, hooks, locks,
+or conflicts that prevent a safe snapshot stop execution before any tracking run.
+Hooks are not bypassed; a hook that changes the snapshot requires manual review.
+
+The archive uses this same scope and reads committed bytes. The saved original
+YAML and source hashes must agree with the commit. Actual branch and repository-wide
+dirty status remain recorded separately: unrelated work can leave the checkout
+dirty. Source changes detected during execution fail the run and are reported
+without masking an original error. These are on-disk checks before packaging and
+at completion, not a filesystem lock. Full configuration, input hashes, and
+installed-environment records remain necessary. Execution commits are local;
+recovering them on another machine requires a later push or Git-bundle transfer.
+See the [execution commit scope and failure behavior](README.md#local-execution-commits).
 
 Configuration/source artifacts are uploaded before model loading, and
 environment/input provenance before compression. Local measurements and failure
@@ -303,8 +323,19 @@ record with its traceback is uploaded if possible, and marking the run failed
 is attempted separately. Diagnostic uploads and status retries target the saved
 run ID even after its context closes. Tracking failures, including context-exit
 errors, do not replace the original exception.
-A run finishes only after checkpoint verification and required uploads succeed;
-an incomplete checkpoint is not uploaded as a verified model.
+A run finishes only after checkpoint verification, MLflow Model verification,
+source-input rechecks, and required uploads succeed. Keep compressed_model.pt and
+also log the actual model with mlflow.pytorch.log_model in the existing run, named
+compressed_model, using explicit serialization_format="pickle" rather than .pt2.
+Include a synthetic input example, signature, pinned requirements, and only the
+necessary tltorch Python code. Pandas is needed by this MLflow flavor; the tested
+numerical stack stays fixed. Reload the Model package independently and compare
+stored state, factor types/ranks, and predictions without decomposing again.
+Packaging stays outside measurements and preserves the measured model's device,
+dtype, and evaluation mode. Store the returned URI and optional model ID in
+run.json, and reload evidence in mlflow_model_verification.json. Logging or
+verification failure fails the same run; no extra run or Model Registry entry is
+created. An incomplete checkpoint is not uploaded as a verified model.
 
 Authenticated workspace listing using MLflow 3.17.2 has succeeded on Cheetah,
 including access to `quirc`. Browser login alone would not establish client
