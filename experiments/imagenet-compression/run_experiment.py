@@ -709,7 +709,7 @@ def save_and_verify_model(model, report, inputs, output):
     return verification
 
 
-def log_and_verify_mlflow_model(model, report, inputs, output):
+def log_and_verify_mlflow_model(model, report, inputs, output, *, parameters=None):
     """Log the measured model as trusted pickle, then verify an independent reload."""
     import torch
     import mlflow.pytorch
@@ -735,12 +735,14 @@ def log_and_verify_mlflow_model(model, report, inputs, output):
                 destination = library / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(source.read_bytes())
+        # Passing an existing model ID avoids log_model's automatic run-parameter copy.
+        logged_model = mlflow.initialize_logged_model(name="compressed_model", params=parameters or {})
         info = mlflow.pytorch.log_model(
-            model, name="compressed_model", serialization_format="pickle",
+            model, name="compressed_model", model_id=logged_model.model_id, serialization_format="pickle",
             input_example=example, signature=signature, pip_requirements=requirements,
             code_paths=[str(library)],
         )
-        metadata = {"model_uri": info.model_uri, "model_id": getattr(info, "model_id", None),
+        metadata = {"model_uri": info.model_uri, "model_id": logged_model.model_id,
                     "serialization_format": "pickle", "pip_requirements": requirements}
         # Save the URI immediately, so a failed reload still leaves a usable diagnostic.
         run = json.loads((output / "run.json").read_text())
@@ -838,35 +840,63 @@ def comparison_rows(observations, report):
     return rows
 
 
-def log_requested_settings(config):
-    """Expose comparison settings as parameters, without mixing in conversion results."""
-    import mlflow
-
+def requested_parameters(config):
+    """Return separate encoded run settings and requested model settings."""
     runtime, timing = config["runtime"], config["timing"]
     layers = config["compression"]["layers"]
-    parameters = {
-        "model": config["model"], "weights": config["weights"],
-        "seed": runtime["seed"], "timing_seed": timing["seed"],
-        "device": runtime["device"], "dtype": runtime["dtype"],
-        "implementation": config["compression"]["implementation"],
-        "compression.layers": sorted(layers),
-        "evaluation.batch_size": runtime["batch_size"], "evaluation.workers": runtime["workers"],
-        "runtime.threads": runtime["threads"],
+    run_parameters = {
+        "device": runtime["device"], "dtype": runtime["dtype"], "seed": runtime["seed"],
+        "evaluation.batch_size": runtime["batch_size"], "runtime.threads": runtime["threads"],
         "timing.input_shape": timing["input_shape"],
         "timing.warmup": timing["warmup"], "timing.repeats": timing["repeats"],
+    }
+    model_parameters = {
+        "model": config["model"], "weights": config["weights"],
+        "implementation": config["compression"]["implementation"],
+        "compression.layers": sorted(layers),
     }
     for name, settings in sorted(layers.items()):
         for option, value in sorted(settings.items()):
             prefix = f"compression.{name}.{option}"
             if option == "decomposition_kwargs":
                 for control, requested in sorted(value.items()):
-                    parameters[f"{prefix}.{control}"] = requested
+                    model_parameters[f"{prefix}.{control}"] = requested
             else:
-                parameters[prefix] = value
-    for key, value in parameters.items():
-        # JSON keeps rank 1 distinct from target 1.0 and makes lists unambiguous.
-        encoded = value if isinstance(value, str) else json.dumps(value, sort_keys=True, allow_nan=False)
-        mlflow.log_param(key, encoded, synchronous=True)
+                model_parameters[prefix] = value
+    for parameters in (run_parameters, model_parameters):
+        for key, value in parameters.items():
+            # JSON keeps rank 1 distinct from target 1.0 and makes lists unambiguous.
+            parameters[key] = value if isinstance(value, str) else json.dumps(value, sort_keys=True, allow_nan=False)
+    return run_parameters, model_parameters
+
+
+def log_comparison_metrics(rows, conversion_seconds, run_id, model_id):
+    """Log the dashboard allowlist with explicit run-only or compressed-model ownership."""
+    import mlflow
+    from mlflow.entities import Metric
+
+    absolute_metrics = ("top1_percent", "top5_percent", "cross_entropy_mean", "parameter_count",
+                        "parameter_bytes", "latency_median_ms", "latency_p25_ms", "latency_p75_ms")
+    timestamp = int(time.time() * 1000)
+    metrics = []
+    for row in rows:
+        variant = row["variant"]
+        for key in absolute_metrics:
+            value = row[key]
+            if math.isfinite(value):
+                metrics.append(Metric(f"{variant}.{key}", float(value), timestamp, 0,
+                                      model_id=model_id if variant == "compressed" else None,
+                                      run_id=run_id))
+        if variant == "compressed":
+            for key in ("top1_change_pp", "top5_change_pp"):
+                if math.isfinite(row[key]):
+                    metrics.append(Metric(f"compressed.{key}", float(row[key]), timestamp, 0, run_id=run_id))
+    metrics.append(Metric("conversion_seconds", conversion_seconds, timestamp, 0, run_id=run_id))
+    # Even client batches fill missing IDs from the active model. Clear that default;
+    # the explicit IDs above still attach compressed absolute metrics to the model.
+    # Call after model logging, which would otherwise copy existing step-zero metrics.
+    mlflow.clear_active_model()
+    mlflow.MlflowClient().log_batch(run_id, metrics=metrics, synchronous=True)
 
 
 def run_experiment(config, original_config, *, config_path):
@@ -919,8 +949,7 @@ def run_experiment(config, original_config, *, config_path):
         experiment = mlflow.set_experiment(tracking["experiment_name"])
         experiment_id = experiment.experiment_id
         tags = {"tracking.workspace": tracking["workspace"], "git.branch": revision["branch"],
-                "git.commit": revision["commit"],
-                "git.dirty": str(bool(revision["working_tree_status"].strip())).lower()}
+                "git.commit": revision["commit"]}
         with mlflow.start_run(experiment_id=experiment_id, run_name=tracking["run_name"], tags=tags) as run:
             run_id = run.info.run_id
             try:
@@ -933,10 +962,8 @@ def run_experiment(config, original_config, *, config_path):
                 mlflow.log_artifact(str(output / "effective_config.json"))
                 for filename in ("original_config.yaml", "run.json", "source.json", "source.zip"):
                     mlflow.log_artifact(str(output / filename))
-                log_requested_settings(config)
-                for key, value in {"git_commit": revision["commit"], **configuration_hashes,
-                                   "source_archive_sha256": revision["source_archive_sha256"],
-                                   "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest()}.items():
+                run_parameters, model_parameters = requested_parameters(config)
+                for key, value in run_parameters.items():
                     mlflow.log_param(key, value, synchronous=True)
 
                 baseline, preprocessing = load_cached_baseline(weight_path, device)
@@ -992,14 +1019,11 @@ def run_experiment(config, original_config, *, config_path):
                                                   "\n\nFLOPs unavailable: " + FLOPS["reason"] + "\n")
                 save_and_verify_model(compressed, report, inputs, output)
                 verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
-                log_and_verify_mlflow_model(compressed, report, inputs, output)
+                model_verification = log_and_verify_mlflow_model(
+                    compressed, report, inputs, output, parameters=model_parameters)
                 verification = verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
                 write_json(output / "execution_inputs_verification.json", verification)
-                for row in rows:
-                    for key, value in row.items():
-                        if type(value) in (int, float) and math.isfinite(value):
-                            mlflow.log_metric(f"{row['variant']}.{key}", float(value), synchronous=True)
-                mlflow.log_metric("conversion_seconds", conversion_seconds, synchronous=True)
+                log_comparison_metrics(rows, conversion_seconds, run_id, model_verification["model_id"])
                 # The run remains open until checkpoint verification and every required upload succeed.
                 mlflow.log_artifacts(str(output))
                 verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)

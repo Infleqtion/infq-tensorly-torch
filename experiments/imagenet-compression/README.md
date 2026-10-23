@@ -186,24 +186,64 @@ Configuration and source-provenance files are uploaded before model loading.
 The manifest and environment/input provenance follow before compression, so a
 failed conversion still has useful context on the server.
 
-MLflow parameters make the requested settings directly comparable: `compression.layers`
-lists selected names, and `compression.<layer>.<option>` records each factorization,
-rank, tensorization, fixed-rank mode, and parameter cap when supplied. Explicit
-decomposition controls use `compression.<layer>.decomposition_kwargs.<control>`.
-Integer rank `1` is recorded as `1`, while floating-point target `1.0` stays `1.0`;
-lists use deterministic JSON. The runner does not add decomposition defaults to
-these requested parameters. Actual ranks, effective decomposition settings,
-storage, and reconstruction errors remain in `compression_report.json`.
+The **Runs** view shows execution settings as parameters: `device`, `dtype`,
+`evaluation.batch_size`, `runtime.threads`, `seed`, `timing.input_shape`,
+`timing.repeats`, and `timing.warmup`. Their names and encoding are unchanged.
 
-Evaluation settings use `evaluation.batch_size` and `evaluation.workers`; thread
-count is `runtime.threads`. Timing settings use `timing.input_shape`,
-`timing.warmup`, and `timing.repeats`. Existing model, weights, device, dtype,
-implementation, and seed parameters remain available. Tags `git.branch`,
-`git.commit`, and `git.dirty` describe the actual checkout; `git.dirty` is `true`
-or `false`, and does not prevent a run.
+The **Models** view shows the compressed LoggedModel's requested settings as
+model parameters: `model`, `weights`, `implementation`, `compression.layers`,
+and every supplied `compression.<layer>.<option>` field. These include rank,
+factorization, tensorization, fixed-rank modes, and parameter caps. Decomposition
+controls use `compression.<layer>.decomposition_kwargs.<control>`. These settings
+are not duplicated as run parameters. Integer rank `1` stays `1`, floating-point
+target `1.0` stays `1.0`, and lists use deterministic JSON. Actual ranks, effective
+decomposition settings, storage, and reconstruction errors remain in the report.
 
-Parameters, metrics, and artifacts use MLflow's fluent logging functions, which
-write to the active run. Uploads remain synchronous. The run context marks success
+Only the following existing metrics appear on the run dashboard:
+
+| Metric suffix | Prefixes |
+| --- | --- |
+| `top1_percent`, `top5_percent`, `cross_entropy_mean` | `dense.`, `compressed.` |
+| `parameter_count`, `parameter_bytes` | `dense.`, `compressed.` |
+| `latency_median_ms`, `latency_p25_ms`, `latency_p75_ms` | `dense.`, `compressed.` |
+| `top1_change_pp`, `top5_change_pp` | `compressed.` |
+
+`conversion_seconds` remains a run metric. The eight compressed absolute metrics
+are also associated with the compressed model's ID, so Models can compare its
+accuracy, storage, and latency. Dense metrics, accuracy deltas, and conversion
+time remain run-only results. Counts of evaluated/correct images, macro metrics,
+buffer bytes, replaced-layer totals, and dense zero deltas remain in measurements,
+CSV, and compression reports; they are no longer dashboard metrics. Measurements
+are unchanged: logged metrics keep full precision, while the CSV retains its
+existing formatting (percentages/deltas to two decimals and latencies to three).
+
+`evaluation.workers` and `timing_seed` remain in configuration/provenance artifacts,
+not searchable parameters. Tags `git.branch` and `git.commit` identify the recorded
+checkout, and `tracking.workspace` identifies its workspace. Execution inputs are
+committed and verified; repository-wide working-tree status remains in provenance
+rather than a dashboard tag. No replacement hash tags are added.
+
+With MLflow 3.17.2, ordinary model logging copies existing run parameters onto a
+new model. The runner instead initializes one LoggedModel with its model settings
+and passes that same ID to PyTorch model logging. Run parameters can therefore
+remain available early for failed runs without leaking onto the model. Only one
+run and one compressed model are created; no baseline model or Registry entry is
+added. The complete configuration is still uploaded before model loading, so
+failed conversions retain all requested settings even before a Model exists.
+
+MLflow also infers metric associations and copies existing step-zero metrics when
+logging a model. The runner logs metrics after model packaging, clears the implicit
+active-model default, and uses a synchronous client batch with explicit model IDs
+only on compressed absolute metrics. Passing `model_id=None` to fluent metric
+logging alone would not prevent unwanted associations. The tested behavior uses
+MLflow 3.17.2's LoggedModel initialization, existing-model logging, and metric-ID
+APIs; the tracking server must support them. An isolated temporary file-store test
+checks real SDK behavior without a server or added dependencies. The file-store
+opt-in is confined to that test; configured execution still requires HTTP(S).
+Older completed runs and models keep their original fields.
+
+Parameters and artifacts use the fluent API, and metrics use the explicit client
+batch described above. Uploads remain synchronous. The run context marks success
 only after model verification and all required successful-run uploads complete. On
 failure, the runner retains `failure.json` with the original error and traceback,
 attempts to upload it, and independently attempts to mark the run failed. Neither
@@ -270,12 +310,14 @@ committed execution inputs described below, with per-file SHA-256 hashes. It
 excludes datasets, environments, historical runs, and unrelated personal files.
 
 `original_config_file_sha256` and `effective_config_file_sha256` identify the exact
-saved configuration files. They are recorded as MLflow parameters and in `run.json`
-and `provenance.json`, alongside manifest/source provenance. The effective file
+saved configuration files. They remain in `run.json` and `provenance.json`,
+alongside manifest/source provenance, and are not searchable parameters. The effective file
 contains resolved absolute paths: its hash is **not** a machine-independent ID
 for equivalent experiments. Use the individual settings to compare experiments;
-use these hashes to identify exact artifacts. `manifest_sha256` and
-`source_archive_sha256` are also available as parameters.
+use these hashes to identify exact artifacts. `manifest_sha256` stays in provenance;
+`source_archive_sha256` stays in `source.json` and its provenance copy. The Git
+commit stays in those records and the existing `git.commit` tag. None of these
+hashes or the old `git_commit` field are logged as run parameters or new tags.
 
 `compressed_model.pt` contains the actual model architecture, parameters, and
 buffers, not instructions to decompose again. PyTorch's full-model serialization
@@ -393,9 +435,12 @@ commit already created. The runner never stashes, amends, switches branches,
 configures identity, or pushes.
 
 `source.json` records the commit, selected configuration path, source-file hashes,
-and `execution_inputs_match_commit`, separately from the actual repository-wide
-dirty status. Unrelated changes can keep `git.dirty=true`. The source archive reads
-the recorded commit, and the saved original YAML must match its committed bytes.
+and `execution_inputs_match_commit`. Its `working_tree_status` records the actual
+repository-wide status, also retained in `provenance.json` alongside the environment
+record's `working_tree_dirty` flag. Unrelated work can leave the checkout dirty even
+when execution inputs match the commit. This status is not logged as an MLflow tag.
+The source archive reads the recorded commit, and the saved original YAML must
+match its committed bytes.
 The exact effective configuration, installed environment, manifests, and weight
 hashes remain necessary: a Git commit does not capture those external inputs.
 

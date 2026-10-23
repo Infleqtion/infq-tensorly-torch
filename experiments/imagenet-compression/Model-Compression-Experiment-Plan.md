@@ -289,12 +289,39 @@ baseline measured on that same partition. Clear run names can distinguish pilot,
 individual-layer, combined, confirmation, and final comparisons; automated stage
 or batch orchestration is not implemented.
 
-Selected layers and requested settings are logged as individual parameters for
-comparison. Actual ranks, effective fitting controls, storage, and approximation
-errors remain in the compression report. Exact configuration files, the manifest,
+For future runs, the Runs view keeps eight execution parameters: device, dtype,
+evaluation.batch_size, runtime.threads, seed, timing.input_shape, timing.repeats,
+and timing.warmup. The compressed LoggedModel in Models instead carries model,
+weights, implementation, compression.layers, and all supplied compression layer
+settings and decomposition controls, with deterministic rank/list encoding and
+no duplication as run parameters. Workers and the timing seed stay in artifacts.
+Actual ranks, effective fitting controls, storage, and approximation errors remain
+in the compression report. Exact configuration files, the manifest,
 environment/input provenance, and source artifacts accompany each run. The
 effective configuration resolves absolute paths; its SHA-256 identifies that
 exact file, not a machine-independent definition of an equivalent experiment.
+
+The run metric allowlist contains dense. and compressed. top1_percent,
+top5_percent, cross_entropy_mean, parameter_count, parameter_bytes,
+latency_median_ms, latency_p25_ms, and latency_p75_ms. Add only the existing
+compressed.top1_change_pp, compressed.top5_change_pp, and conversion_seconds.
+Associate only the eight compressed absolute metrics with the model ID. Baseline,
+delta, and conversion metrics stay run-only. Previously logged extra counts,
+macro metrics, buffer bytes, replaced-layer totals, and dense zero deltas stay
+in result artifacts. Measurement calculations and CSV formatting are unchanged.
+
+MLflow 3.17.2 inherits run parameters during normal model creation. Initialize the
+same compressed LoggedModel with only its model parameters, then package into
+that ID. Log metrics afterwards, clear the active-model default, and use an
+explicit client batch to avoid implicit model associations and step-zero backfill.
+Temporary file-backed SDK tests check this without contacting the shared server;
+normal execution still requires HTTP(S) and a server supporting these APIs.
+Keep `git.branch`, `git.commit`, and `tracking.workspace` as tags; do not explicitly
+log `git.dirty` or replace it with another tracking field. Configuration, manifest,
+source, and Git hashes remain in their existing artifacts. Remove hash run
+parameters without adding new tags.
+The full configuration still uploads early. Apply this only to future runs;
+completed records are unchanged. See the [dashboard arrangement](README.md#prepare-once-then-run-a-configuration).
 
 Before normal execution contacts tracking, practical preflight checks run and
 changed execution inputs are committed locally. An unchanged scope reuses HEAD.
@@ -307,9 +334,10 @@ or conflicts that prevent a safe snapshot stop execution before any tracking run
 Hooks are not bypassed; a hook that changes the snapshot requires manual review.
 
 The archive uses this same scope and reads committed bytes. The saved original
-YAML and source hashes must agree with the commit. Actual branch and repository-wide
-dirty status remain recorded separately: unrelated work can leave the checkout
-dirty. Source changes detected during execution fail the run and are reported
+YAML and source hashes must agree with the commit. Repository-wide working-tree
+status remains in source provenance, and the environment record retains its dirty
+flag: unrelated work can leave the checkout dirty even when execution inputs match
+the commit. Source changes detected during execution fail the run and are reported
 without masking an original error. These are on-disk checks before packaging and
 at completion, not a filesystem lock. Full configuration, input hashes, and
 installed-environment records remain necessary. Execution commits are local;

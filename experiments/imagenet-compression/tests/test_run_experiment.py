@@ -1,9 +1,11 @@
 """Offline workflow checks: tiny synthetic images/models and a recording MLflow client."""
 
 from contextlib import contextmanager
+import csv
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -227,7 +229,9 @@ class RecordingMlflow:
 
     def __init__(self):
         self.events, self.fail = [], None
-        self.metrics = {}
+        self.metrics, self.metric_models, self.model_params = {}, {}, {}
+        self.model_count = 0
+        self.active_model_id = None
         self.params, self.tags, self.uploads = {}, {}, {}
         self.uri = self.workspace = self.active_run_id = None
         self.run_count = 0
@@ -281,9 +285,28 @@ class RecordingMlflow:
         assert kwargs["synchronous"] and isinstance(value, str)
         self.params[key] = value
 
-    def log_metric(self, key, value, **kwargs):
-        self.metrics[key] = value
-        assert kwargs["synchronous"]
+    def initialize_logged_model(self, *, name, params):
+        assert self.active_run_id == "run-1" and name == "compressed_model"
+        self.events.append("initialize compressed model")
+        if self.fail == "model initialization":
+            raise RuntimeError("MLflow model initialization failed")
+        self.model_count += 1
+        self.model_params = dict(params)
+        return SimpleNamespace(model_id="model-1")
+
+    def log_metric(self, *args, **kwargs):
+        pytest.fail("Use metric batches with explicit model ownership")
+
+    def clear_active_model(self):
+        self.active_model_id = None
+
+    def log_batch(self, run_id, *, metrics, synchronous):
+        assert run_id == self.active_run_id == "run-1" and synchronous
+        assert self.active_model_id is None
+        for metric in metrics:
+            assert metric.run_id == run_id
+            self.metrics[metric.key] = metric.value
+            self.metric_models[metric.key] = metric.model_id
 
     def log_artifacts(self, path):
         assert self.active_run_id == "run-1"
@@ -313,8 +336,10 @@ def tracking(monkeypatch, tmp_path):
         if recording.fail == "model logging":
             raise RuntimeError("MLflow model logging failed")
         assert kwargs.pop("name") == "compressed_model"
+        assert kwargs.pop("model_id") == "model-1" and recording.model_count == 1
         package = tmp_path / "mlflow-package"
         save_model(model, str(package), **kwargs)
+        recording.active_model_id = "model-1"
         return SimpleNamespace(model_uri=str(package), model_id="model-1")
 
     def reload_model(*args, **kwargs):
@@ -326,11 +351,11 @@ def tracking(monkeypatch, tmp_path):
     monkeypatch.setattr(mlflow.pytorch, "log_model", log_model)
     monkeypatch.setattr(mlflow.pytorch, "load_model", reload_model)
     for name in ("set_tracking_uri", "set_workspace", "set_experiment", "start_run",
-                 "log_param", "log_metric", "log_artifact", "log_artifacts"):
+                 "initialize_logged_model", "clear_active_model", "log_param", "log_metric", "log_artifact", "log_artifacts"):
         monkeypatch.setattr(f"mlflow.{name}", getattr(recording, name))
 
-    def failure_client(*, tracking_uri):
-        assert tracking_uri == recording.uri
+    def failure_client(*, tracking_uri=None):
+        assert tracking_uri is None or tracking_uri == recording.uri
         return recording
 
     monkeypatch.setattr("mlflow.MlflowClient", failure_client)
@@ -417,8 +442,8 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
     assert events == ["uri https://configured.example.invalid", "workspace quirc", "experiment model-compression", "start", "upload effective_config.json", "upload original_config.yaml",
                       "upload run.json", "upload source.json", "upload source.zip", "load baseline",
                       "upload evaluation_manifest.json", "upload provenance.json", "compress",
-                      "log compressed model", "reload compressed model", "all artifacts", "FINISHED"]
-    assert tracking.run_count == 1 and tracking.active_run_id is None
+                      "initialize compressed model", "log compressed model", "reload compressed model", "all artifacts", "FINISHED"]
+    assert tracking.run_count == tracking.model_count == 1 and tracking.active_run_id is None
     assert tracking.uri == config["tracking"]["uri"]
     assert tracking.run_name == config["tracking"]["run_name"]
     run = json.loads(client.uploads["run.json"])
@@ -434,9 +459,10 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
     source = json.loads(client.uploads["source.json"])
     assert client.tags == {"tracking.workspace": "quirc",
                            "git.branch": runner.git("branch", "--show-current").strip(),
-                           "git.commit": runner.git("rev-parse", "HEAD").strip(),
-                           "git.dirty": str(bool(source["working_tree_status"].strip())).lower()}
+                           "git.commit": runner.git("rev-parse", "HEAD").strip()}
+    assert source["working_tree_status"] == runner.git("status", "--short", "--untracked-files=all")
     provenance = json.loads(client.uploads["provenance.json"])
+    assert provenance["git"]["working_tree_status"] == source["working_tree_status"]
     assert provenance["cache"] == {"torch_home": config["cache"]["torch_home"],
                                    "hub_dir": str(Path(config["cache"]["torch_home"]) / "hub")}
     assert provenance["weights"]["checkpoint_path"] == str(
@@ -447,12 +473,62 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
                           ("effective_config.json", "effective_config_file_sha256")):
         digest = hashlib.sha256((output / filename).read_bytes()).hexdigest()
         assert hashlib.sha256(client.uploads[filename]).hexdigest() == digest
-        assert run[key] == provenance[key] == client.params[key] == digest
-    assert client.params["manifest_sha256"] == hashlib.sha256(client.uploads["evaluation_manifest.json"]).hexdigest()
-    assert client.params["source_archive_sha256"] == hashlib.sha256(client.uploads["source.zip"]).hexdigest()
+        assert run[key] == provenance[key] == digest
+    assert provenance["manifest_sha256"] == hashlib.sha256(client.uploads["evaluation_manifest.json"]).hexdigest()
+    assert source["source_archive_sha256"] == hashlib.sha256(client.uploads["source.zip"]).hexdigest()
     assert runner.model_fingerprint(baseline) == fingerprint
-    assert client.metrics["dense.examples"] == client.metrics["compressed.examples"] == 4
-    assert "conversion_seconds" in client.metrics
+    run_parameters, model_parameters = runner.requested_parameters(config)
+    assert client.params == run_parameters and client.model_params == model_parameters
+    assert not client.params.keys() & client.model_params.keys()
+    assert provenance["seeds"]["timing"] == config["timing"]["seed"]
+    assert json.loads(client.uploads["effective_config.json"])["runtime"]["workers"] == config["runtime"]["workers"]
+    absolute = ("top1_percent", "top5_percent", "cross_entropy_mean", "parameter_count",
+                "parameter_bytes", "latency_median_ms", "latency_p25_ms", "latency_p75_ms")
+    measurements = json.loads(client.uploads["measurements.json"])
+    report = json.loads(client.uploads["compression_report.json"])
+    rows = list(csv.DictReader(client.uploads["results.csv"].decode().splitlines()))
+    expected_metrics, expected_owners = {}, {}
+    for row in rows:
+        variant = row["variant"]
+        side = "original" if variant == "dense" else "compressed"
+        for key in absolute:
+            name = f"{variant}.{key}"
+            if key.startswith("latency_"):
+                value = measurements["models"][variant]["latency"][key.removeprefix("latency_")]
+            elif key in ("parameter_count", "parameter_bytes"):
+                value = report["model"][side][key]
+            else:
+                value = measurements["models"][variant]["accuracy"][key]
+            if key.startswith("latency_"):
+                assert float(row[key]) == round(value, 3)
+            elif key.endswith("_percent"):
+                assert float(row[key]) == round(value, 2)
+            else:
+                assert float(row[key]) == value
+            expected_metrics[name] = float(value)
+            expected_owners[name] = "model-1" if variant == "compressed" else None
+        # Removed dashboard fields retain their original values in the result artifacts.
+        accuracy = measurements["models"][variant]["accuracy"]
+        assert accuracy["examples"] == 4
+        for key in ("examples", "top1_correct", "top5_correct", "macro_precision", "macro_recall", "macro_f1", "macro_classes"):
+            assert float(row[key]) == accuracy[key]
+        side = "original" if variant == "dense" else "compressed"
+        assert float(row["buffer_bytes"]) == report["model"][side]["buffer_bytes"]
+        for key in ("parameter_count", "parameter_bytes", "buffer_bytes"):
+            assert float(row["replaced_" + key]) == report["replaced_layers"][side][key]
+        if variant == "compressed":
+            for key in ("top1_change_pp", "top5_change_pp"):
+                accuracy_key = key.replace("_change_pp", "_percent")
+                value = accuracy[accuracy_key] - measurements["models"]["dense"]["accuracy"][accuracy_key]
+                assert float(row[key]) == round(value, 2)
+                expected_metrics["compressed." + key] = value
+                expected_owners["compressed." + key] = None
+        else:
+            assert float(row["top1_change_pp"]) == float(row["top5_change_pp"]) == 0
+    expected_metrics["conversion_seconds"] = measurements["conversion_seconds"]
+    expected_owners["conversion_seconds"] = None
+    assert client.metrics == expected_metrics
+    assert client.metric_models == expected_owners
     assert (output / "original_config.yaml").read_bytes() == original
     assert (output / "evaluation_manifest.json").read_bytes() == Path(config["data"]["manifest"]).read_bytes()
     with zipfile.ZipFile(output / "source.zip") as archive:
@@ -626,7 +702,7 @@ def test_missing_weights_explain_cache_setup_without_downloading(tmp_path, monke
         runner.cached_weights()
 
 
-def test_requested_parameters_keep_rank_meaning_and_supplied_controls(config_file, tracking):
+def test_requested_parameters_keep_rank_meaning_and_supplied_controls(config_file):
     path, config = config_file
     config["compression"]["layers"] = {
         "fc": {"factorization": "BlockTT", "rank": 1,
@@ -638,11 +714,14 @@ def test_requested_parameters_keep_rank_meaning_and_supplied_controls(config_fil
     }
     path.write_text(yaml.safe_dump(config))
     effective, _ = runner.load_config(path)
-    client = tracking
-    runner.log_requested_settings(effective)
-    assert client.params == {
+    run_parameters, model_parameters = runner.requested_parameters(effective)
+    assert run_parameters == {
+        "seed": "2026", "device": "cuda:0", "dtype": "float32", "evaluation.batch_size": "16",
+        "runtime.threads": "4", "timing.input_shape": "[1, 3, 224, 224]", "timing.warmup": "20",
+        "timing.repeats": "100",
+    }
+    assert model_parameters == {
         "model": "torchvision.resnet18", "weights": "ResNet18_Weights.IMAGENET1K_V1",
-        "seed": "2026", "timing_seed": "2027", "device": "cuda:0", "dtype": "float32",
         "implementation": "factorized", "compression.layers": '["fc", "layer4.0.conv2"]',
         "compression.fc.factorization": "BlockTT", "compression.fc.rank": "1",
         "compression.fc.in_tensorized_features": "[4, 8]",
@@ -653,15 +732,10 @@ def test_requested_parameters_keep_rank_meaning_and_supplied_controls(config_fil
         "compression.layer4.0.conv2.decomposition_kwargs.n_iter_max": "2",
         "compression.layer4.0.conv2.decomposition_kwargs.tol": "0.0",
         "compression.layer4.0.conv2.decomposition_kwargs.random_state": "7",
-        "evaluation.batch_size": "16", "evaluation.workers": "0", "runtime.threads": "4",
-        "timing.input_shape": "[1, 3, 224, 224]", "timing.warmup": "20", "timing.repeats": "100",
     }
     # YAML order must not change parameter strings or add library defaults.
     effective["compression"]["layers"] = dict(reversed(list(effective["compression"]["layers"].items())))
-    first = dict(client.params)
-    client.params.clear()
-    runner.log_requested_settings(effective)
-    assert client.params == first
+    assert runner.requested_parameters(effective) == (run_parameters, model_parameters)
 
 
 def test_unavailable_cuda_is_rejected_without_cpu_fallback(monkeypatch):
@@ -732,7 +806,7 @@ def test_same_cuda_checkpoint_loads_on_cpu_and_cuda(tmp_path, monkeypatch):
     torch.testing.assert_close(outputs[0], outputs[1], rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("failure", ["model logging", "model verification"])
+@pytest.mark.parametrize("failure", ["model initialization", "model logging", "model verification"])
 def test_mlflow_model_errors_keep_failure_record_and_never_finish(execution, tracking, failure):
     config, original, baseline, events = execution
     tracking.fail = failure
@@ -947,3 +1021,92 @@ def test_nonexecution_commands_do_not_change_global_hub_cache(config_file, tmp_p
         runner.main(["--help"])
     assert caught.value.code == 0
     assert torch.hub.get_dir() == before
+
+
+def test_real_local_mlflow_separates_parameters_and_metric_ownership(config_file, tmp_path):
+    path, config = config_file
+    config["compression"]["layers"]["fc"]["rank"] = 1
+    config["compression"]["layers"]["layer4.0.conv2"]["rank"] = 1.0
+    path.write_text(yaml.safe_dump(config))
+    # A subprocess isolates MLflow's tracking URI, active model, and experiment state.
+    # File storage is an opt-in fixture only; the runner still requires HTTP(S).
+    environment = {**os.environ, "MLFLOW_TRACKING_URI": (tmp_path / "tracking").as_uri(),
+                   "MLFLOW_ALLOW_FILE_STORE": "true", "MLFLOW_ENABLE_TELEMETRY": "false",
+                   "MLFLOW_DISABLE_AGENT_HINT": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+    environment.pop("MLFLOW_RUN_ID", None)
+    code = """
+from pathlib import Path
+from unittest.mock import patch
+import sys
+sys.path.insert(0, sys.argv[1])
+with patch("socket.socket.connect", side_effect=AssertionError("Temporary local storage only")):
+    import torch
+    import mlflow
+    import run_experiment as runner
+
+    config, _ = runner.load_config(sys.argv[2])
+    run_parameters, model_parameters = runner.requested_parameters(config)
+    experiment = mlflow.set_experiment("offline-dashboard")
+    with mlflow.start_run(experiment_id=experiment.experiment_id) as run:
+        for key, value in run_parameters.items():
+            mlflow.log_param(key, value, synchronous=True)
+        output = Path(sys.argv[3]) / "output"
+        output.mkdir()
+        runner.write_json(output / "run.json", {"run_id": run.info.run_id})
+        # This checks tracking destinations, not decomposition or scientific measurements.
+        check = runner.log_and_verify_mlflow_model(
+            torch.nn.Linear(2, 2).eval(), {"replacements": []}, torch.ones(1, 2), output,
+            parameters=model_parameters)
+        client = mlflow.MlflowClient()
+        model_id = check["model_id"]
+        record = client.get_logged_model(model_id)
+        assert record.source_run_id == run.info.run_id
+        assert record.params == model_parameters
+        assert record.params["compression.fc.rank"] == "1"
+        assert record.params["compression.layer4.0.conv2.rank"] == "1.0"
+        assert client.get_run(run.info.run_id).data.params == run_parameters
+        assert not run_parameters.keys() & record.params.keys()
+
+        absolute = ("top1_percent", "top5_percent", "cross_entropy_mean", "parameter_count",
+                    "parameter_bytes", "latency_median_ms", "latency_p25_ms", "latency_p75_ms")
+        rows = []
+        expected_metrics, expected_model_metrics = {}, {}
+        for variant, offset in (("dense", 1), ("compressed", 2)):
+            row = {"variant": variant, **{key: index + offset for index, key in enumerate(absolute)},
+                   "top1_change_pp": -3.0, "top5_change_pp": -1.0, "examples": 4,
+                   "buffer_bytes": 9, "macro_precision": 0.5, "replaced_parameter_count": 2}
+            rows.append(row)
+            for key in absolute:
+                expected_metrics[f"{variant}.{key}"] = float(row[key])
+                if variant == "compressed":
+                    expected_model_metrics[f"compressed.{key}"] = float(row[key])
+        expected_metrics.update({"compressed.top1_change_pp": -3.0,
+                                 "compressed.top5_change_pp": -1.0, "conversion_seconds": 0.25})
+        # Deliberately enable the SDK's implicit model default to exercise the guard.
+        mlflow.set_active_model(model_id=model_id)
+        runner.log_comparison_metrics(rows, 0.25, run.info.run_id, model_id)
+        assert mlflow.get_active_model_id() is None
+        assert client.get_run(run.info.run_id).data.metrics == expected_metrics
+        model_metrics = client.get_logged_model(model_id).metrics
+        assert {metric.key: metric.value for metric in model_metrics} == expected_model_metrics
+        assert all(metric.model_id == model_id and metric.run_id == run.info.run_id for metric in model_metrics)
+    assert client.get_run(run.info.run_id).info.status == "FINISHED"
+    models = client.search_logged_models(experiment_ids=[experiment.experiment_id])
+    assert len(models) == 1 and models[0].model_id == model_id
+    assert len(client.search_runs([experiment.experiment_id])) == 1
+"""
+    subprocess.run([sys.executable, "-B", "-c", code, str(runner.EXPERIMENT_DIR), str(path), str(tmp_path)],
+                   env=environment, cwd=tmp_path, check=True)
+
+
+def test_metric_upload_failure_keeps_original_error_and_diagnostics(execution, monkeypatch, tracking):
+    config, original, _, events = execution
+    error = OSError("metric upload failed")
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(tracking, "log_batch", fail)
+    with pytest.raises(OSError) as caught:
+        runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
+    assert caught.value is error
+    assert events[-2:] == ["upload failure.json", "FAILED"] and "FINISHED" not in events
+    assert json.loads(tracking.uploads["failure.json"])["error"] == "metric upload failed"
