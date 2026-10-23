@@ -2,7 +2,7 @@
 
 ResNet-18: choosing layers, factorizations, and compression levels.
 
-Updated: **22 October 2026**. Active branch: `rafael/exp`.
+Updated: **23 October 2026**. Active branch: `rafael/exp`.
 Repository: [Infleqtion/infq-tensorly-torch](https://github.com/Infleqtion/infq-tensorly-torch).
 Base commit: `e323c465493c9a956b34efe81ca4d36cba356933`.
 
@@ -10,8 +10,9 @@ The prepared data splits, configured runner, MLflow workspace support, and local
 CPU/CUDA checks now exist. The experiment preparation and directory refactor are
 work on `rafael/exp` after the base commit above. Local execution checks use small
 models and a recording tracking client. Cheetah hardware and authenticated
-workspace listing have been checked; a real tracked comparison, artifact
-upload/download, the feasibility pilot, and the wider study have not run.
+workspace listing have been checked. The current single-model runner is validated
+offline and awaits deployment and manual execution. Existing completed runs remain
+as recorded; the feasibility pilot and wider study have not run.
 
 This plan is separate from the unchanged
 [compression feature specification](../../PR-Pipeline-Model-Compression.md).
@@ -38,8 +39,10 @@ immediate effect of replacing trained weights with factorized approximations.
 Use TorchVision ResNet-18 with `ResNet18_Weights.IMAGENET1K_V1`, ImageNetV2
 matched-frequency, the weight enum's preprocessing, and numeric folder labels.
 Start every candidate from the untouched pretrained baseline, never from an
-already-compressed candidate. Measure that baseline on the same partition as
-the compressed model; published ImageNet accuracy is not a substitute.
+already-compressed candidate. Evaluate the dense reference in a separate configured
+run on the same partition as the compressed candidates; published ImageNet accuracy
+is not a substitute. Each runner execution evaluates and logs only its selected
+model. Compare the separate runs in the same MLflow experiment.
 
 Use factorized execution, float32, and evaluation mode. Select CPU or CUDA
 explicitly in the configuration; unavailable CUDA must fail rather than silently
@@ -193,27 +196,29 @@ cache.torch_home YAML setting chooses the parent of hub/, with home expansion an
 experiment-relative path resolution. Explicit YAML overrides TORCH_HOME; omitting
 it keeps PyTorch's prior behavior. Only real execution changes the Hub directory,
 before weight checks and loading. Effective configuration and provenance retain
-the resolved cache and checkpoint paths. One YAML
-describes one compressed configuration and its measured dense baseline on the
-same partition. It can be executed repeatedly: each execution creates a unique
-run ID and local output directory, saving the exact original and effective
+the resolved cache and checkpoint paths. One YAML describes one dense or compressed
+model. Omit compression or use null for dense execution; a supplied compression
+mapping must remain valid and nonempty. The dense configuration keeps the same
+model, weights, manifest, cache, runtime, timing, experiment, and output settings,
+with run name resnet18-exploration-dense. It can be executed repeatedly: each
+execution creates a unique run ID and local output directory, saving the exact original and effective
 configurations. Historical outputs must not be overwritten. DVC is deferred and
 is not part of this workflow.
 
 ## Separate implemented measurements from planned work
 
-The current runner implements one comparison. The table describes what it saves,
+The current runner implements one model evaluation. The table describes what it saves,
 not results of the proposed pilot or wider study.
 
 | Measurement or artifact | Current status |
 | --- | --- |
-| Top-1/top-5 accuracy | Implemented for both models, including changes in percentage points from the measured dense baseline |
-| Mean cross-entropy; macro precision, recall, F1 | Implemented values for both models; their changes from baseline are not separately saved |
-| Actual parameter counts; parameter and buffer bytes | Implemented through compression reports, with layer, replacement-total, and whole-model counts |
+| Top-1/top-5 accuracy | Implemented for the selected model; compare separate runs, with no automatic accuracy deltas |
+| Mean cross-entropy; macro precision, recall, F1 | Implemented for the selected model; detailed values remain in artifacts |
+| Actual parameter counts; parameter and buffer bytes | Shared library accounting for dense models; compression reports retain original/replaced/whole-model diagnostics after conversion |
 | Weight reconstruction errors; actual ranks | Implemented per replaced layer, alongside requested and effective conversion settings |
-| Conversion time | Implemented separately from inference timing |
+| Conversion time | Recorded only when compression occurs, separately from inference timing |
 | Inference latency | Implemented median, quartiles, and raw samples with recorded warm-up/repeat settings |
-| Compressed checkpoint and provenance | Implemented save/reload verification, configurations, hashes, environment, and source archive |
+| Model checkpoint and provenance | Dense and factorized save/reload verification, configurations, hashes, environment, and source archive |
 | Per-image outcomes for paired comparisons | Planned; current aggregate results are insufficient for this analysis |
 | Layer-output error on fixed real inputs | Planned |
 | Peak inference memory | Planned |
@@ -283,17 +288,19 @@ uses the tracking API, not a direct connection to the server's SQLite database.
 If server storage is discussed, its directory is `/mnt/chicago-ml/mlflow/` on
 Cheetah; its deployment and filesystem still need verification.
 
-Use one MLflow experiment for the study. Each run records one compressed
-configuration, its fitting settings/seed, one evaluation partition, and a dense
-baseline measured on that same partition. Clear run names can distinguish pilot,
-individual-layer, combined, confirmation, and final comparisons; automated stage
+Use one MLflow experiment for the study. Each run records one dense or compressed
+model, its settings/seed, and one evaluation partition. Evaluate the dense reference
+separately on that partition, then compare the common metrics in MLflow. The runner
+does not retrieve baseline results, compute cross-run differences, or launch an
+extra run. Clear run names can distinguish pilot, individual-layer, combined, confirmation, and final comparisons; automated stage
 or batch orchestration is not implemented.
 
 For future runs, the Runs view keeps eight execution parameters: device, dtype,
 evaluation.batch_size, runtime.threads, seed, timing.input_shape, timing.repeats,
-and timing.warmup. The compressed LoggedModel in Models instead carries model,
-weights, implementation, compression.layers, and all supplied compression layer
-settings and decomposition controls, with deterministic rank/list encoding and
+and timing.warmup. Each execution creates one LoggedModel named model. Its parameters
+always include model and weights; only compressed models add implementation,
+compression.layers, and supplied layer settings/decomposition controls. Keep
+deterministic rank/list encoding, no invented dense compression settings, and
 no duplication as run parameters. Workers and the timing seed stay in artifacts.
 Actual ranks, effective fitting controls, storage, and approximation errors remain
 in the compression report. Exact configuration files, the manifest,
@@ -301,18 +308,18 @@ environment/input provenance, and source artifacts accompany each run. The
 effective configuration resolves absolute paths; its SHA-256 identifies that
 exact file, not a machine-independent definition of an equivalent experiment.
 
-The run metric allowlist contains dense. and compressed. top1_percent,
-top5_percent, cross_entropy_mean, parameter_count, parameter_bytes,
-latency_median_ms, latency_p25_ms, and latency_p75_ms. Add only the existing
-compressed.top1_change_pp, compressed.top5_change_pp, and conversion_seconds.
-Associate only the eight compressed absolute metrics with the model ID. Baseline,
-delta, and conversion metrics stay run-only. Previously logged extra counts,
-macro metrics, buffer bytes, replaced-layer totals, and dense zero deltas stay
-in result artifacts. Measurement calculations and CSV formatting are unchanged.
+The run metric allowlist is the same eight unprefixed names for either model:
+top1_percent, top5_percent, cross_entropy_mean, parameter_count, parameter_bytes,
+latency_median_ms, latency_p25_ms, and latency_p75_ms. Associate all eight with
+that run's model ID. Only compressed runs add conversion_seconds, with no model
+association; dense runs omit it. Remove accuracy deltas from all new results.
+Detailed counts, macro metrics, buffer bytes, and raw timing samples stay in
+artifacts. Original-versus-factorized weight/storage and replaced-layer diagnostics
+stay in the compression report without evaluating the original model. Accuracy,
+loss, macro-metric, storage, latency calculations and CSV precision are unchanged.
 
 MLflow 3.17.2 inherits run parameters during normal model creation. Initialize the
-same compressed LoggedModel with only its model parameters, then package into
-that ID. Log metrics afterwards, clear the active-model default, and use an
+selected LoggedModel with only its model parameters, then package into that ID. Log metrics afterwards, clear the active-model default, and use an
 explicit client batch to avoid implicit model associations and step-zero backfill.
 Temporary file-backed SDK tests check this without contacting the shared server;
 normal execution still requires HTTP(S) and a server supporting these APIs.
@@ -352,9 +359,11 @@ is attempted separately. Diagnostic uploads and status retries target the saved
 run ID even after its context closes. Tracking failures, including context-exit
 errors, do not replace the original exception.
 A run finishes only after checkpoint verification, MLflow Model verification,
-source-input rechecks, and required uploads succeed. Keep compressed_model.pt and
-also log the actual model with mlflow.pytorch.log_model in the existing run, named
-compressed_model, using explicit serialization_format="pickle" rather than .pt2.
+source-input rechecks, and required uploads succeed. Save model.pt and log the actual
+dense or compressed model with mlflow.pytorch.log_model in the existing run, named
+model, using explicit serialization_format="pickle" rather than .pt2. The shared
+trusted checkpoint loader keeps its load_compressed_model compatibility helper for
+historical filenames.
 Include a synthetic input example, signature, pinned requirements, and only the
 necessary tltorch Python code. Pandas is needed by this MLflow flavor; the tested
 numerical stack stays fixed. Reload the Model package independently and compare
@@ -367,16 +376,20 @@ created. An incomplete checkpoint is not uploaded as a verified model.
 
 Authenticated workspace listing using MLflow 3.17.2 has succeeded on Cheetah,
 including access to `quirc`. Browser login alone would not establish client
-authentication. Experiment/run creation, artifact upload/download, and the real
-comparison remain unverified; do not create a diagnostic run. Local recording-
-client checks establish code behavior, not those server permissions. The next
-comparison will be started manually using the [Cheetah instructions](README.md#manual-execution-on-cheetah).
+authentication. This single-model refactor has not been deployed or exercised
+against the shared server; do not create a diagnostic run. Offline recording-client
+and local SDK checks establish code behavior, not current server permissions.
+After review and deployment, start the desired dense or compressed configuration
+manually using the [Cheetah instructions](README.md#manual-execution-on-cheetah).
 
 ## Make study results easy to review
 
-Each completed comparison already produces a two-row CSV, readable report,
-configurations, compression reports, manifest, measurements, raw timings,
-verified checkpoint, and provenance. Failed executions retain available local
+Each future execution produces a one-row results.csv, readable report, configurations,
+manifest, measurements, raw timings, verified model.pt, and provenance.
+measurements.json has one variant with accuracy, latency, and storage; only
+compressed runs include conversion_seconds and compression_report.json.
+latency_samples.json holds the selected model's raw sample list. Historical
+artifacts and notebook comparison workflows retain their existing formats. Failed executions retain available local
 evidence. These files support review alongside MLflow; they are not offline runs.
 
 Study-wide CSV summaries, per-image analyses, plots, and shortlist decisions are

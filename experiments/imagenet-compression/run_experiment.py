@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare ImageNetV2 or run one configured, tracked model-compression comparison.
+"""Prepare ImageNetV2 or evaluate one configured model in a tracked run.
 
 Importing this file only defines helpers. Preparation and dry-run do not import
 PyTorch, load models, or contact tracking. Optional notebooks reuse these helpers.
@@ -100,7 +100,7 @@ def load_config(path):
     """Return the effective configuration and original bytes; YAML paths use EXPERIMENT_DIR; the config filename uses the caller's directory."""
     original = Path(path).expanduser().read_bytes()
     config = yaml.load(original, Loader=UniqueSafeLoader)
-    _keys(config, ("model", "weights", "data", "compression", "runtime", "timing", "tracking", "output_root"), ("cache",), "configuration")
+    _keys(config, ("model", "weights", "data", "runtime", "timing", "tracking", "output_root"), ("compression", "cache"), "configuration")
     if config["model"] != "torchvision.resnet18" or config["weights"] != "ResNet18_Weights.IMAGENET1K_V1":
         raise ValueError("This runner supports torchvision.resnet18 with ResNet18_Weights.IMAGENET1K_V1")
     _keys(config["data"], ("raw_dir", "manifest"), (), "data")
@@ -117,30 +117,31 @@ def load_config(path):
         except (ValueError, RuntimeError, OSError) as error:
             raise ValueError(f"Invalid cache.torch_home: {error}") from error
 
-    compression = config["compression"]
-    _keys(compression, ("implementation", "layers"), (), "compression")
-    if compression["implementation"] not in ("factorized", "reconstructed"):
-        raise ValueError("compression.implementation must be factorized or reconstructed")
-    if not isinstance(compression["layers"], dict) or not compression["layers"]:
-        raise ValueError("compression.layers must be a nonempty mapping")
-    # Catch misspellings here; layer compatibility and decomposition rules belong to compress_model.
-    optional = ("fixed_rank_modes", "in_tensorized_features", "out_tensorized_features",
-                "max_parameters", "decomposition_kwargs")
-    for name, settings in compression["layers"].items():
-        if not isinstance(name, str):
-            raise ValueError("Layer names must be strings")
-        _keys(settings, ("factorization", "rank"), optional, f"layer {name!r}")
-        if settings["factorization"] not in ("CP", "Tucker", "TT", "BlockTT"):
-            raise ValueError(f"Unknown factorization for layer {name!r}")
-        rank = settings["rank"]
-        valid_rank = ((type(rank) in (int, float) and math.isfinite(rank) and rank > 0)
-                      or rank == "same" or (isinstance(rank, list) and bool(rank)
-                                            and all(type(n) is int and n > 0 for n in rank)))
-        if not valid_rank:
-            raise ValueError(f"Layer {name!r}: rank must be positive numeric, an integer list, or 'same'")
-        if "decomposition_kwargs" in settings:
-            _keys(settings["decomposition_kwargs"], (), ("init", "n_iter_max", "tol", "random_state", "l2_reg"),
-                  f"layer {name!r} decomposition_kwargs")
+    compression = config.setdefault("compression", None)
+    if compression is not None:
+        _keys(compression, ("implementation", "layers"), (), "compression")
+        if compression["implementation"] not in ("factorized", "reconstructed"):
+            raise ValueError("compression.implementation must be factorized or reconstructed")
+        if not isinstance(compression["layers"], dict) or not compression["layers"]:
+            raise ValueError("compression.layers must be a nonempty mapping")
+        # Catch misspellings here; layer compatibility and decomposition rules belong to compress_model.
+        optional = ("fixed_rank_modes", "in_tensorized_features", "out_tensorized_features",
+                    "max_parameters", "decomposition_kwargs")
+        for name, settings in compression["layers"].items():
+            if not isinstance(name, str):
+                raise ValueError("Layer names must be strings")
+            _keys(settings, ("factorization", "rank"), optional, f"layer {name!r}")
+            if settings["factorization"] not in ("CP", "Tucker", "TT", "BlockTT"):
+                raise ValueError(f"Unknown factorization for layer {name!r}")
+            rank = settings["rank"]
+            valid_rank = ((type(rank) in (int, float) and math.isfinite(rank) and rank > 0)
+                          or rank == "same" or (isinstance(rank, list) and bool(rank)
+                                                and all(type(n) is int and n > 0 for n in rank)))
+            if not valid_rank:
+                raise ValueError(f"Layer {name!r}: rank must be positive numeric, an integer list, or 'same'")
+            if "decomposition_kwargs" in settings:
+                _keys(settings["decomposition_kwargs"], (), ("init", "n_iter_max", "tol", "random_state", "l2_reg"),
+                      f"layer {name!r} decomposition_kwargs")
 
     runtime = config["runtime"]
     _keys(runtime, ("seed", "device", "dtype", "batch_size", "workers", "threads"), (), "runtime")
@@ -170,8 +171,9 @@ def describe(config):
     """Explain the plan and distinguish structural validation from execution checks."""
     import json
 
-    return ("Configuration is valid. Planned comparison: dense pretrained ResNet-18 versus one compressed copy.\n"
-            "Both use the supplied manifest without resampling; eager execution, opt_einsum disabled.\n"
+    selected = "compressed" if config["compression"] is not None else "dense pretrained"
+    return (f"Configuration is valid. Planned evaluation: one {selected} ResNet-18 model.\n"
+            "Uses the supplied manifest without resampling; eager execution, opt_einsum disabled.\n"
             "No model/weights loaded, images decoded, outputs created, or tracking calls made.\n"
             "Execution must still check input files/hashes, cached weights, CUDA availability, layer compatibility, "
             "MLflow access/uploads, and checkpoint loading.\n" + json.dumps(config, indent=2))
@@ -658,6 +660,8 @@ def save_source(output, snapshot):
 def layer_identity(model, report):
     """Record the concrete factor types and ranks, not just the requested target."""
     identity = {}
+    if report is None:
+        return identity
     for entry in report["replacements"]:
         layer = model.get_submodule(entry["name"])
         rank = layer.rank
@@ -669,7 +673,7 @@ def layer_identity(model, report):
     return identity
 
 
-def load_compressed_model(path, device="cpu"):
+def load_model(path, device="cpu"):
     """Load our trusted full-model checkpoint; requires matching repository code and packages.
 
     This uses pickle (weights_only=False). Only load artifacts from trusted runs.
@@ -683,14 +687,19 @@ def load_compressed_model(path, device="cpu"):
     return model.eval()
 
 
+def load_compressed_model(path, device="cpu"):
+    """Compatibility loader for trusted historical compressed_model.pt checkpoints."""
+    return load_model(path, device)
+
+
 def save_and_verify_model(model, report, inputs, output):
     """Reload independently and check stored state, factorization identity, and a fixed forward pass."""
     import torch
 
-    path = output / "compressed_model.pt"
+    path = output / "model.pt"
     model.eval()
     torch.save(model, path)
-    loaded = load_compressed_model(path, inputs.device)
+    loaded = load_model(path, inputs.device)
     before, after = layer_identity(model, report), layer_identity(loaded, report)
     if before != after or model_fingerprint(model) != model_fingerprint(loaded):
         raise RuntimeError("Reloaded model differs in stored parameters, buffers, factorization types, or ranks")
@@ -736,9 +745,9 @@ def log_and_verify_mlflow_model(model, report, inputs, output, *, parameters=Non
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(source.read_bytes())
         # Passing an existing model ID avoids log_model's automatic run-parameter copy.
-        logged_model = mlflow.initialize_logged_model(name="compressed_model", params=parameters or {})
+        logged_model = mlflow.initialize_logged_model(name="model", params=parameters or {})
         info = mlflow.pytorch.log_model(
-            model, name="compressed_model", model_id=logged_model.model_id, serialization_format="pickle",
+            model, name="model", model_id=logged_model.model_id, serialization_format="pickle",
             input_example=example, signature=signature, pip_requirements=requirements,
             code_paths=[str(library)],
         )
@@ -748,7 +757,7 @@ def log_and_verify_mlflow_model(model, report, inputs, output, *, parameters=Non
         run = json.loads((output / "run.json").read_text())
         run["mlflow_model"] = metadata
         write_json(output / "run.json", run)
-        print(f"MLflow compressed model: {info.model_uri}", flush=True)
+        print(f"MLflow model: {info.model_uri}", flush=True)
         loaded = mlflow.pytorch.load_model(
             info.model_uri, dst_path=temporary, map_location=inputs.device, weights_only=False)
         if (model_fingerprint(loaded) != before
@@ -826,7 +835,7 @@ def load_cached_baseline(path, device):
 
 
 def comparison_rows(observations, report):
-    """Use the public compression report for both dense and compressed storage totals."""
+    """Historical two-model rows; configured executions use single_model_row."""
     rows = []
     for name, side in (("dense", "original"), ("compressed", "compressed")):
         measurement = observations[name]
@@ -840,29 +849,49 @@ def comparison_rows(observations, report):
     return rows
 
 
+def single_model_row(variant, measurement):
+    """Keep one model's measurements in a flat CSV row, without cross-run differences."""
+    row = {"variant": variant, **measurement["accuracy"], **measurement["storage"]}
+    row.update({f"latency_{key}": value for key, value in measurement["latency"].items() if key != "samples_ms"})
+    if "conversion_seconds" in measurement:
+        row["conversion_seconds"] = measurement["conversion_seconds"]
+    row.update(flops_total=None, flops_reason=FLOPS["reason"])
+    return row
+
+
+def single_model_table(row):
+    """Show the selected model's accuracy, storage, and latency without a baseline row."""
+    headings = ["Model", "Top-1 %", "Top-5 %", "Mean cross-entropy", "Parameters", "Param MiB", "Buffer bytes", "Latency ms [p25, p75]"]
+    values = [row["variant"], f"{row['top1_percent']:.2f}", f"{row['top5_percent']:.2f}",
+              f"{row['cross_entropy_mean']:.6f}", str(row["parameter_count"]),
+              f"{row['parameter_bytes'] / 2**20:.2f}", str(row["buffer_bytes"]),
+              f"{row['latency_median_ms']:.2f} [{row['latency_p25_ms']:.2f}, {row['latency_p75_ms']:.2f}]"]
+    return "\n".join((" | ".join(headings), " | ".join("---" for _ in headings), " | ".join(values)))
+
+
 def requested_parameters(config):
     """Return separate encoded run settings and requested model settings."""
     runtime, timing = config["runtime"], config["timing"]
-    layers = config["compression"]["layers"]
+    compression = config["compression"]
     run_parameters = {
         "device": runtime["device"], "dtype": runtime["dtype"], "seed": runtime["seed"],
         "evaluation.batch_size": runtime["batch_size"], "runtime.threads": runtime["threads"],
         "timing.input_shape": timing["input_shape"],
         "timing.warmup": timing["warmup"], "timing.repeats": timing["repeats"],
     }
-    model_parameters = {
-        "model": config["model"], "weights": config["weights"],
-        "implementation": config["compression"]["implementation"],
-        "compression.layers": sorted(layers),
-    }
-    for name, settings in sorted(layers.items()):
-        for option, value in sorted(settings.items()):
-            prefix = f"compression.{name}.{option}"
-            if option == "decomposition_kwargs":
-                for control, requested in sorted(value.items()):
-                    model_parameters[f"{prefix}.{control}"] = requested
-            else:
-                model_parameters[prefix] = value
+    model_parameters = {"model": config["model"], "weights": config["weights"]}
+    if compression is not None:
+        layers = compression["layers"]
+        model_parameters["implementation"] = compression["implementation"]
+        model_parameters["compression.layers"] = sorted(layers)
+        for name, settings in sorted(layers.items()):
+            for option, value in sorted(settings.items()):
+                prefix = f"compression.{name}.{option}"
+                if option == "decomposition_kwargs":
+                    for control, requested in sorted(value.items()):
+                        model_parameters[f"{prefix}.{control}"] = requested
+                else:
+                    model_parameters[prefix] = value
     for parameters in (run_parameters, model_parameters):
         for key, value in parameters.items():
             # JSON keeps rank 1 distinct from target 1.0 and makes lists unambiguous.
@@ -870,43 +899,33 @@ def requested_parameters(config):
     return run_parameters, model_parameters
 
 
-def log_comparison_metrics(rows, conversion_seconds, run_id, model_id):
-    """Log the dashboard allowlist with explicit run-only or compressed-model ownership."""
+def log_model_metrics(row, run_id, model_id):
+    """Associate eight absolute metrics with this model; conversion time stays run-only."""
     import mlflow
     from mlflow.entities import Metric
 
     absolute_metrics = ("top1_percent", "top5_percent", "cross_entropy_mean", "parameter_count",
                         "parameter_bytes", "latency_median_ms", "latency_p25_ms", "latency_p75_ms")
     timestamp = int(time.time() * 1000)
-    metrics = []
-    for row in rows:
-        variant = row["variant"]
-        for key in absolute_metrics:
-            value = row[key]
-            if math.isfinite(value):
-                metrics.append(Metric(f"{variant}.{key}", float(value), timestamp, 0,
-                                      model_id=model_id if variant == "compressed" else None,
-                                      run_id=run_id))
-        if variant == "compressed":
-            for key in ("top1_change_pp", "top5_change_pp"):
-                if math.isfinite(row[key]):
-                    metrics.append(Metric(f"compressed.{key}", float(row[key]), timestamp, 0, run_id=run_id))
-    metrics.append(Metric("conversion_seconds", conversion_seconds, timestamp, 0, run_id=run_id))
-    # Even client batches fill missing IDs from the active model. Clear that default;
-    # the explicit IDs above still attach compressed absolute metrics to the model.
-    # Call after model logging, which would otherwise copy existing step-zero metrics.
+    metrics = [Metric(key, float(row[key]), timestamp, 0, model_id=model_id, run_id=run_id)
+               for key in absolute_metrics if math.isfinite(row[key])]
+    if "conversion_seconds" in row:
+        metrics.append(Metric("conversion_seconds", row["conversion_seconds"], timestamp, 0, run_id=run_id))
+    # Client batches otherwise infer missing IDs from the active model. Log after
+    # packaging, which would also backfill existing step-zero metrics onto a model.
     mlflow.clear_active_model()
     mlflow.MlflowClient().log_batch(run_id, metrics=metrics, synchronous=True)
 
 
 def run_experiment(config, original_config, *, config_path):
-    """Validate inputs, establish tracking, then load, compress, measure, save, and finish.
+    """Validate inputs, commit sources, then track, select, measure, verify, and upload one model.
 
     Tests record the MLflow calls offline; execution requires the configured server.
     """
     import torch
     import numpy as np
     from tltorch import compress_model
+    from tltorch.utils.model_compression import _measure_storage
 
     tracking = config["tracking"]
     validate_tracking_uri(tracking["uri"])
@@ -966,8 +985,8 @@ def run_experiment(config, original_config, *, config_path):
                 for key, value in run_parameters.items():
                     mlflow.log_param(key, value, synchronous=True)
 
-                baseline, preprocessing = load_cached_baseline(weight_path, device)
-                original_state = model_fingerprint(baseline)
+                source, preprocessing = load_cached_baseline(weight_path, device)
+                original_state = model_fingerprint(source)
                 environment = environment_info()
                 for package in ("mlflow-skinny", "PyYAML"):
                     environment["packages"][package] = importlib.metadata.version(package)
@@ -988,42 +1007,52 @@ def run_experiment(config, original_config, *, config_path):
                 for filename in ("evaluation_manifest.json", "provenance.json"):
                     mlflow.log_artifact(str(output / filename))
 
-                if device.type == "cuda":
-                    torch.cuda.synchronize(device)
-                started = time.perf_counter()
-                # Decomposition creates trainable parameters and must stay outside inference mode.
-                compressed, report = compress_model(baseline, config["compression"]["layers"],
-                                                    implementation=config["compression"]["implementation"])
-                if device.type == "cuda":
-                    torch.cuda.synchronize(device)
-                conversion_seconds = time.perf_counter() - started
-                if model_fingerprint(baseline) != original_state:
-                    raise RuntimeError("Conversion changed baseline parameters or buffers")
-                write_json(output / "compression_report.json", report)
+                compression = config["compression"]
+                model, report = source, None
+                conversion_seconds = None
+                if compression is not None:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    started = time.perf_counter()
+                    # Decomposition creates trainable parameters; keep it outside inference mode.
+                    model, report = compress_model(source, compression["layers"],
+                                                   implementation=compression["implementation"])
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    conversion_seconds = time.perf_counter() - started
+                    if model_fingerprint(source) != original_state:
+                        raise RuntimeError("Conversion changed pretrained source parameters or buffers")
+                    write_json(output / "compression_report.json", report)
+                    storage = report["model"]["compressed"]
+                else:
+                    # Reuse the library's tensor accounting without copying or converting dense models.
+                    storage = _measure_storage([model])
+
                 batches = make_loader(config["data"]["raw_dir"], manifest, preprocessing,
                                       batch_size=runtime["batch_size"], workers=runtime["workers"], seed=runtime["seed"])
                 inputs = torch.randn(*timing["input_shape"], device=device, dtype=torch.float32,
                                      generator=torch.Generator(device=device).manual_seed(timing["seed"]))
-                observations = {}
-                for name, model in (("dense", baseline), ("compressed", compressed)):
-                    accuracy = evaluate(model, batches, device)
-                    latency = measure_latency(model, inputs, warmup=timing["warmup"], repeats=timing["repeats"])
-                    observations[name] = {"accuracy": accuracy, "latency": latency}
-                    write_json(output / "measurements.json", {"conversion_seconds": conversion_seconds, "models": observations})
-                if model_fingerprint(baseline) != original_state:
-                    raise RuntimeError("Evaluation changed baseline parameters or buffers")
-                rows = comparison_rows(observations, report)
-                write_csv(output / "results.csv", rows)
-                write_json(output / "latency_samples.json", {name: item["latency"]["samples_ms"] for name, item in observations.items()})
-                (output / "report.md").write_text(results_table(rows) + "\n\n" + provenance["macro_metrics"] +
+                measurement = {"accuracy": evaluate(model, batches, device),
+                               "latency": measure_latency(model, inputs, warmup=timing["warmup"], repeats=timing["repeats"]),
+                               "storage": storage}
+                if model_fingerprint(source) != original_state:
+                    raise RuntimeError("Evaluation changed pretrained source parameters or buffers")
+                if conversion_seconds is not None:
+                    measurement["conversion_seconds"] = conversion_seconds
+                variant = "compressed" if compression is not None else "dense"
+                write_json(output / "measurements.json", {"variant": variant, **measurement})
+                row = single_model_row(variant, measurement)
+                write_csv(output / "results.csv", [row])
+                write_json(output / "latency_samples.json", measurement["latency"]["samples_ms"])
+                (output / "report.md").write_text(single_model_table(row) + "\n\n" + provenance["macro_metrics"] +
                                                   "\n\nFLOPs unavailable: " + FLOPS["reason"] + "\n")
-                save_and_verify_model(compressed, report, inputs, output)
+                save_and_verify_model(model, report, inputs, output)
                 verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
                 model_verification = log_and_verify_mlflow_model(
-                    compressed, report, inputs, output, parameters=model_parameters)
+                    model, report, inputs, output, parameters=model_parameters)
                 verification = verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
                 write_json(output / "execution_inputs_verification.json", verification)
-                log_comparison_metrics(rows, conversion_seconds, run_id, model_verification["model_id"])
+                log_model_metrics(row, run_id, model_verification["model_id"])
                 # The run remains open until checkpoint verification and every required upload succeed.
                 mlflow.log_artifacts(str(output))
                 verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
@@ -1296,7 +1325,7 @@ def main(argv=None):
             print(describe(config))
             return 0
         output = run_experiment(config, original, config_path=args.config)
-        print(f"Completed comparison; all required artifacts uploaded. Local files: {output}")
+        print(f"Completed model evaluation; all required artifacts uploaded. Local files: {output}")
         return 0
     except Exception as error:
         print(f"Experiment failed: {error}", file=sys.stderr)

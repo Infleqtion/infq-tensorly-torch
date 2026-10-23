@@ -62,6 +62,11 @@ def test_config_keeps_rank_types_and_uses_experiment_paths(config_file, tmp_path
     (lambda c: c["tracking"].update(workspace=None), "tracking.workspace must be a nonempty string"),
     (lambda c: c["runtime"].update(batch_size=True), "batch_size must be an integer"),
     (lambda c: c["runtime"].update(device="cuda"), "explicit CUDA"),
+    (lambda c: c.update(compression=False), "compression must be a mapping"),
+    (lambda c: c.update(compression=[]), "compression must be a mapping"),
+    (lambda c: c.update(compression="dense"), "compression must be a mapping"),
+    (lambda c: c.update(compression={}), "compression: missing options"),
+    (lambda c: c["compression"].update(layers={}), "compression.layers must be a nonempty mapping"),
     (lambda c: c["compression"]["layers"]["fc"].update(rnak=2), "unknown options"),
     (lambda c: c["compression"]["layers"]["fc"].update(rank=True), "rank must be"),
     (lambda c: c["timing"].update(repeats=1), "repeats must be"),
@@ -74,6 +79,30 @@ def test_invalid_configuration(config_file, change, message):
         runner.load_config(path)
 
 
+@pytest.mark.parametrize("compression", ["absent", "null"])
+def test_optional_compression_normalizes_dense_configuration(config_file, compression):
+    path, config = config_file
+    if compression == "absent":
+        config.pop("compression")
+    else:
+        config["compression"] = None
+    path.write_text(yaml.safe_dump(config))
+    effective, original = runner.load_config(path)
+    assert effective["compression"] is None and original == path.read_bytes()
+    _, model_parameters = runner.requested_parameters(effective)
+    assert model_parameters == {"model": config["model"], "weights": config["weights"]}
+    assert "one dense pretrained ResNet-18 model" in runner.describe(effective)
+
+
+def test_dense_example_preserves_existing_scientific_settings():
+    directory = runner.EXPERIMENT_DIR / "configs"
+    compressed = yaml.safe_load((directory / "resnet18_exploration.yaml").read_text())
+    dense = yaml.safe_load((directory / "resnet18_exploration_dense.yaml").read_text())
+    compressed.pop("compression")
+    compressed["tracking"]["run_name"] = "resnet18-exploration-dense"
+    assert dense == compressed
+
+
 def test_yaml_is_safe_and_duplicate_options_are_rejected(tmp_path):
     path = tmp_path / "bad.yaml"
     path.write_text("model: first\nmodel: second\n")
@@ -84,8 +113,11 @@ def test_yaml_is_safe_and_duplicate_options_are_rejected(tmp_path):
         runner.load_config(path)
 
 
-def test_dry_run_imports_no_execution_modules_and_creates_no_outputs(config_file, tmp_path):
+@pytest.mark.parametrize("compressed", [False, True])
+def test_dry_run_imports_no_execution_modules_and_creates_no_outputs(config_file, tmp_path, compressed):
     path, config = config_file
+    if not compressed:
+        config.pop("compression")
     config["output_root"] = str(tmp_path / "outputs")
     config["data"] = {"raw_dir": str(tmp_path / "missing-data"), "manifest": str(tmp_path / "missing.json")}
     path.write_text(yaml.safe_dump(config))
@@ -187,17 +219,25 @@ def tiny_model():
     return model, layers
 
 
-def test_real_checkpoint_round_trip_without_loading_weights_or_decomposing(tmp_path, monkeypatch):
+@pytest.mark.parametrize("factorization", [None, "Tucker", "TT"])
+def test_real_checkpoint_round_trip_without_loading_weights_or_decomposing(tmp_path, monkeypatch, factorization):
     model, layers = tiny_model()
-    compressed, report = compress_model(model, layers)
+    if factorization == "TT":
+        layers["0"] = {"factorization": "TT", "rank": 2}
+    compressed, report = (model, None) if factorization is None else compress_model(model, layers)
     inputs = torch.arange(48, dtype=torch.float32).reshape(1, 3, 4, 4) / 48
     verification = runner.save_and_verify_model(compressed, report, inputs, tmp_path)
     assert verification["passed"] and verification["parameters_and_buffers_exact"]
-    assert "TuckerTensor" in verification["layers"]["0"]["weight_type"]
-    assert "BlockTT" in verification["layers"]["3"]["weight_type"]
+    if factorization is None:
+        assert verification["layers"] == {}
+    else:
+        assert factorization in verification["layers"]["0"]["weight_type"]
+        assert "BlockTT" in verification["layers"]["3"]["weight_type"]
     monkeypatch.setattr(torch.hub, "load_state_dict_from_url", lambda *a, **k: pytest.fail("download"))
     monkeypatch.setattr(tltorch, "compress_model", lambda *a, **k: pytest.fail("decomposition"))
-    loaded = runner.load_compressed_model(tmp_path / "compressed_model.pt")
+    loaded = runner.load_model(tmp_path / "model.pt")
+    # Historical loading instructions remain valid through the compatibility helper.
+    assert runner.model_fingerprint(runner.load_compressed_model(tmp_path / "model.pt")) == runner.model_fingerprint(loaded)
     assert loaded is not compressed
     assert torch.equal(loaded.remember, model.remember)
     torch.testing.assert_close(loaded(inputs), compressed(inputs), rtol=0, atol=0)
@@ -212,15 +252,18 @@ from run_experiment import load_compressed_model
 root = Path(sys.argv[2])
 with patch("torch.hub.load_state_dict_from_url", side_effect=AssertionError("download")), \
      patch("tltorch.compress_model", side_effect=AssertionError("decomposition")):
-    model = load_compressed_model(root / "compressed_model.pt")
+    model = load_compressed_model(root / "model.pt")
 check = torch.load(root / "verification_input.pt", weights_only=True)
 with torch.inference_mode():
     torch.testing.assert_close(model(check["inputs"]), check["expected_outputs"], rtol=1e-5, atol=1e-6)
-assert type(model[0].weight).__name__ == "TuckerTensor"
-assert type(model[3].weight).__name__ == "BlockTT"
+if sys.argv[3] == "dense":
+    assert isinstance(model[0], torch.nn.Conv2d) and isinstance(model[3], torch.nn.Linear)
+else:
+    assert type(model[0].weight).__name__ == sys.argv[3] + "Tensor"
+    assert type(model[3].weight).__name__ == "BlockTT"
 assert model.remember.item() == 7
 """
-    subprocess.run([sys.executable, "-B", "-c", code, str(runner.EXPERIMENT_DIR), str(tmp_path)],
+    subprocess.run([sys.executable, "-B", "-c", code, str(runner.EXPERIMENT_DIR), str(tmp_path), factorization or "dense"],
                    cwd=tmp_path, check=True)
 
 
@@ -286,8 +329,8 @@ class RecordingMlflow:
         self.params[key] = value
 
     def initialize_logged_model(self, *, name, params):
-        assert self.active_run_id == "run-1" and name == "compressed_model"
-        self.events.append("initialize compressed model")
+        assert self.active_run_id == "run-1" and name == "model"
+        self.events.append("initialize model")
         if self.fail == "model initialization":
             raise RuntimeError("MLflow model initialization failed")
         self.model_count += 1
@@ -311,7 +354,7 @@ class RecordingMlflow:
     def log_artifacts(self, path):
         assert self.active_run_id == "run-1"
         self.events.append("all artifacts")
-        assert (Path(path) / "compressed_model.pt").is_file()
+        assert (Path(path) / "model.pt").is_file()
         assert json.loads((Path(path) / "model_verification.json").read_text())["passed"]
         if self.fail == "late upload":
             raise OSError("artifact upload failed")
@@ -332,10 +375,10 @@ def tracking(monkeypatch, tmp_path):
 
     def log_model(model, **kwargs):
         assert recording.active_run_id == "run-1"
-        recording.events.append("log compressed model")
+        recording.events.append("log model")
         if recording.fail == "model logging":
             raise RuntimeError("MLflow model logging failed")
-        assert kwargs.pop("name") == "compressed_model"
+        assert kwargs.pop("name") == "model"
         assert kwargs.pop("model_id") == "model-1" and recording.model_count == 1
         package = tmp_path / "mlflow-package"
         save_model(model, str(package), **kwargs)
@@ -343,7 +386,7 @@ def tracking(monkeypatch, tmp_path):
         return SimpleNamespace(model_uri=str(package), model_id="model-1")
 
     def reload_model(*args, **kwargs):
-        recording.events.append("reload compressed model")
+        recording.events.append("reload model")
         if recording.fail == "model verification":
             raise RuntimeError("MLflow model reload failed")
         return load_model(*args, **kwargs)
@@ -411,11 +454,25 @@ def execution(config_file, images, tmp_path, monkeypatch, request, tracking, exe
 
 @pytest.mark.parametrize("execution", ["cpu", pytest.param("cuda:0", marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is unavailable"))], indirect=True)
-def test_complete_execution_tracks_before_loading_and_preserves_baseline(execution, capsys, monkeypatch, tracking):
+@pytest.mark.parametrize("compression", ["absent", None, "Tucker", "TT"])
+def test_complete_execution_tracks_and_measures_one_model(execution, capsys, monkeypatch, tracking, compression):
     config, original, baseline, events = execution
+    selected_yaml = runner.EXPERIMENT_DIR / "configs/test.yaml"
+    requested = yaml.safe_load(original)
+    if compression == "absent":
+        requested.pop("compression")
+    elif compression is None:
+        requested["compression"] = None
+    elif compression == "TT":
+        requested["compression"]["layers"]["0"] = {"factorization": "TT", "rank": 2}
+    selected_yaml.write_text(yaml.safe_dump(requested))
+    config, original = runner.load_config(selected_yaml)
+    compressed = config["compression"] is not None
+    if not compressed:
+        monkeypatch.setattr(tltorch, "compress_model", lambda *a, **k: pytest.fail("Dense execution must not convert"))
     fingerprint = runner.model_fingerprint(baseline)
     device = torch.device(config["runtime"]["device"])
-    forward_devices, timing_devices = [], []
+    forward_devices, timing_devices, evaluated_models, timed_models = [], [], [], []
     evaluate, measure_latency = runner.evaluate, runner.measure_latency
 
     def check_forward_device(model, args):
@@ -424,6 +481,8 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
         forward_devices.append(args[0].device)
 
     def checked_evaluation(model, batches, selected_device):
+        assert (model is baseline) == (not compressed)
+        evaluated_models.append(model)
         handle = model.register_forward_pre_hook(check_forward_device)
         try:
             return evaluate(model, batches, selected_device)
@@ -431,6 +490,8 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
             handle.remove()
 
     def checked_latency(model, inputs, **kwargs):
+        assert (model is baseline) == (not compressed)
+        timed_models.append(model)
         check_forward_device(model, (inputs,))
         timing_devices.append(inputs.device)
         return measure_latency(model, inputs, **kwargs)
@@ -441,8 +502,10 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
     output = runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert events == ["uri https://configured.example.invalid", "workspace quirc", "experiment model-compression", "start", "upload effective_config.json", "upload original_config.yaml",
                       "upload run.json", "upload source.json", "upload source.zip", "load baseline",
-                      "upload evaluation_manifest.json", "upload provenance.json", "compress",
-                      "initialize compressed model", "log compressed model", "reload compressed model", "all artifacts", "FINISHED"]
+                      "upload evaluation_manifest.json", "upload provenance.json"] + (["compress"] if compressed else []) + [
+                      "initialize model", "log model", "reload model", "all artifacts", "FINISHED"]
+    assert len(evaluated_models) == len(timed_models) == 1
+    assert evaluated_models[0] is timed_models[0]
     assert tracking.run_count == tracking.model_count == 1 and tracking.active_run_id is None
     assert tracking.uri == config["tracking"]["uri"]
     assert tracking.run_name == config["tracking"]["run_name"]
@@ -485,50 +548,53 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
     absolute = ("top1_percent", "top5_percent", "cross_entropy_mean", "parameter_count",
                 "parameter_bytes", "latency_median_ms", "latency_p25_ms", "latency_p75_ms")
     measurements = json.loads(client.uploads["measurements.json"])
-    report = json.loads(client.uploads["compression_report.json"])
-    rows = list(csv.DictReader(client.uploads["results.csv"].decode().splitlines()))
-    expected_metrics, expected_owners = {}, {}
-    for row in rows:
-        variant = row["variant"]
-        side = "original" if variant == "dense" else "compressed"
-        for key in absolute:
-            name = f"{variant}.{key}"
-            if key.startswith("latency_"):
-                value = measurements["models"][variant]["latency"][key.removeprefix("latency_")]
-            elif key in ("parameter_count", "parameter_bytes"):
-                value = report["model"][side][key]
-            else:
-                value = measurements["models"][variant]["accuracy"][key]
-            if key.startswith("latency_"):
-                assert float(row[key]) == round(value, 3)
-            elif key.endswith("_percent"):
-                assert float(row[key]) == round(value, 2)
-            else:
-                assert float(row[key]) == value
-            expected_metrics[name] = float(value)
-            expected_owners[name] = "model-1" if variant == "compressed" else None
-        # Removed dashboard fields retain their original values in the result artifacts.
-        accuracy = measurements["models"][variant]["accuracy"]
-        assert accuracy["examples"] == 4
-        for key in ("examples", "top1_correct", "top5_correct", "macro_precision", "macro_recall", "macro_f1", "macro_classes"):
-            assert float(row[key]) == accuracy[key]
-        side = "original" if variant == "dense" else "compressed"
-        assert float(row["buffer_bytes"]) == report["model"][side]["buffer_bytes"]
-        for key in ("parameter_count", "parameter_bytes", "buffer_bytes"):
-            assert float(row["replaced_" + key]) == report["replaced_layers"][side][key]
-        if variant == "compressed":
-            for key in ("top1_change_pp", "top5_change_pp"):
-                accuracy_key = key.replace("_change_pp", "_percent")
-                value = accuracy[accuracy_key] - measurements["models"]["dense"]["accuracy"][accuracy_key]
-                assert float(row[key]) == round(value, 2)
-                expected_metrics["compressed." + key] = value
-                expected_owners["compressed." + key] = None
+    # Conv: 2*3 + 2; linear: 6*32 + 6. The nonpersistent float32 buffer adds 4 bytes.
+    original_storage = {"parameter_count": 206, "parameter_bytes": 824, "buffer_bytes": 4}
+    if compressed:
+        report = json.loads(client.uploads["compression_report.json"])
+        assert measurements["storage"] == report["model"]["compressed"]
+        assert report["model"]["original"] == original_storage
+        assert all(set(entry["weight_error"]) == {"absolute", "relative"} for entry in report["replacements"])
+    else:
+        assert "compression_report.json" not in client.uploads
+        assert measurements["storage"] == original_storage
+        assert client.model_params == {"model": config["model"], "weights": config["weights"]}
+    row, = csv.DictReader(client.uploads["results.csv"].decode().splitlines())
+    assert measurements["variant"] == row["variant"] == ("compressed" if compressed else "dense")
+    expected_metrics = {}
+    for key in absolute:
+        if key.startswith("latency_"):
+            value = measurements["latency"][key.removeprefix("latency_")]
+        elif key in ("parameter_count", "parameter_bytes"):
+            value = measurements["storage"][key]
         else:
-            assert float(row["top1_change_pp"]) == float(row["top5_change_pp"]) == 0
-    expected_metrics["conversion_seconds"] = measurements["conversion_seconds"]
-    expected_owners["conversion_seconds"] = None
-    assert client.metrics == expected_metrics
-    assert client.metric_models == expected_owners
+            value = measurements["accuracy"][key]
+        if key.startswith("latency_"):
+            assert float(row[key]) == round(value, 3)
+        elif key.endswith("_percent"):
+            assert float(row[key]) == round(value, 2)
+        else:
+            assert float(row[key]) == value
+        expected_metrics[key] = float(value)
+    expected_owners = {key: "model-1" for key in absolute}
+    if compressed:
+        expected_metrics["conversion_seconds"] = measurements["conversion_seconds"]
+        expected_owners["conversion_seconds"] = None
+        assert float(row["conversion_seconds"]) == measurements["conversion_seconds"]
+    else:
+        assert "conversion_seconds" not in measurements and "conversion_seconds" not in row
+    assert client.metrics == expected_metrics and client.metric_models == expected_owners
+    assert len(client.metrics) == (9 if compressed else 8)
+    accuracy = measurements["accuracy"]
+    assert accuracy["examples"] == 4
+    for key in ("examples", "top1_correct", "top5_correct", "macro_precision", "macro_recall", "macro_f1", "macro_classes"):
+        assert float(row[key]) == accuracy[key]
+    assert float(row["buffer_bytes"]) == measurements["storage"]["buffer_bytes"]
+    assert json.loads(client.uploads["latency_samples.json"]) == measurements["latency"]["samples_ms"]
+    assert len(measurements["latency"]["samples_ms"]) == config["timing"]["repeats"]
+    assert "models" not in measurements
+    assert not any("change_pp" in key for key in row)
+    assert "Δ" not in client.uploads["report.md"].decode()
     assert (output / "original_config.yaml").read_bytes() == original
     assert (output / "evaluation_manifest.json").read_bytes() == Path(config["data"]["manifest"]).read_bytes()
     with zipfile.ZipFile(output / "source.zip") as archive:
@@ -544,9 +610,9 @@ def test_complete_execution_tracks_before_loading_and_preserves_baseline(executi
         assert not any(n.startswith(("experiments/imagenet-compression/data/raw/",
                                                 "experiments/imagenet-compression/data/processed/",
                                                 ".venv/", "experiments/imagenet-compression/results/")) for n in names)
-    assert len((output / "results.csv").read_text().splitlines()) == 3
-    assert len(forward_devices) == 6  # Two evaluation batches and one timing check per model.
-    assert timing_devices == [device, device]
+    assert len((output / "results.csv").read_text().splitlines()) == 2
+    assert len(forward_devices) == 3  # Two evaluation batches and one timing check for the selected model.
+    assert timing_devices == [device]
     assert client.params["device"] == str(device)
     verification = json.loads(client.uploads["model_verification.json"])
     assert verification["passed"] and verification["device"] == str(device)
@@ -666,11 +732,18 @@ def test_diagnostic_tracking_errors_do_not_hide_conversion_error(execution, monk
         assert "failure.json" not in client.uploads
 
 
-def test_serialization_failure_keeps_measurements_and_fails_the_run(execution, monkeypatch, tracking):
+@pytest.mark.parametrize("compressed", [False, True])
+def test_serialization_failure_keeps_measurements_and_fails_the_run(execution, monkeypatch, tracking, compressed):
     config, original, _, events = execution
+    if not compressed:
+        selected = runner.EXPERIMENT_DIR / "configs/test.yaml"
+        requested = yaml.safe_load(original)
+        requested.pop("compression")
+        selected.write_text(yaml.safe_dump(requested))
+        config, original = runner.load_config(selected)
 
     def fail_save(model, report, inputs, output):
-        (output / "compressed_model.pt").write_bytes(b"incomplete checkpoint")
+        (output / "model.pt").write_bytes(b"incomplete checkpoint")
         raise OSError("checkpoint write failed")
 
     monkeypatch.setattr(runner, "save_and_verify_model", fail_save)
@@ -679,7 +752,7 @@ def test_serialization_failure_keeps_measurements_and_fails_the_run(execution, m
         runner.run_experiment(config, original, config_path=runner.EXPERIMENT_DIR / "configs/test.yaml")
     assert tracking.run_count == 1 and tracking.active_run_id is None
     assert events[-1] == "FAILED" and "FINISHED" not in events
-    assert "compressed_model.pt" not in client.uploads and "all artifacts" not in events
+    assert "model.pt" not in client.uploads and "all artifacts" not in events
     assert len(list(Path(config["output_root"]).glob("*/results.csv"))) == 1
 
 
@@ -795,7 +868,7 @@ def test_same_cuda_checkpoint_loads_on_cpu_and_cuda(tmp_path, monkeypatch):
     monkeypatch.setattr(FactorizedLinear, "from_linear", forbidden)
     outputs = []
     for location in ("cpu", "cuda:0"):
-        loaded = runner.load_compressed_model(tmp_path / "compressed_model.pt", device=location)
+        loaded = runner.load_compressed_model(tmp_path / "model.pt", device=location)
         assert runner.model_fingerprint(loaded) == expected_state
         assert runner.layer_identity(loaded, report) == expected_identity
         assert all(t.device == torch.device(location) for t in [*loaded.parameters(), *loaded.buffers()])
@@ -846,12 +919,12 @@ def test_modified_execution_source_is_reported_without_hiding_original_failure(e
     assert events[-1] == "FAILED"
 
 
-@pytest.mark.parametrize("factorization", ["Tucker", "TT"])
+@pytest.mark.parametrize("factorization", [None, "Tucker", "TT"])
 def test_real_mlflow_package_contains_code_and_reloads_in_fresh_process(tmp_path, monkeypatch, tracking, factorization):
     model, layers = tiny_model()
     if factorization == "TT":
         layers["0"] = {"factorization": "TT", "rank": 2}
-    compressed, report = compress_model(model, layers)
+    compressed, report = (model, None) if factorization is None else compress_model(model, layers)
     inputs = torch.arange(48, dtype=torch.float32).reshape(1, 3, 4, 4) / 48
     before = runner.model_fingerprint(compressed)
     modes = [m.training for m in compressed.modules()]
@@ -1023,10 +1096,13 @@ def test_nonexecution_commands_do_not_change_global_hub_cache(config_file, tmp_p
     assert torch.hub.get_dir() == before
 
 
-def test_real_local_mlflow_separates_parameters_and_metric_ownership(config_file, tmp_path):
+@pytest.mark.parametrize("compressed", [False, True])
+def test_real_local_mlflow_separates_parameters_and_metric_ownership(config_file, tmp_path, compressed):
     path, config = config_file
     config["compression"]["layers"]["fc"]["rank"] = 1
     config["compression"]["layers"]["layer4.0.conv2"]["rank"] = 1.0
+    if not compressed:
+        config.pop("compression")
     path.write_text(yaml.safe_dump(config))
     # A subprocess isolates MLflow's tracking URI, active model, and experiment state.
     # File storage is an opt-in fixture only; the runner still requires HTTP(S).
@@ -1062,29 +1138,26 @@ with patch("socket.socket.connect", side_effect=AssertionError("Temporary local 
         record = client.get_logged_model(model_id)
         assert record.source_run_id == run.info.run_id
         assert record.params == model_parameters
-        assert record.params["compression.fc.rank"] == "1"
-        assert record.params["compression.layer4.0.conv2.rank"] == "1.0"
+        assert record.name == "model"
+        if config["compression"] is not None:
+            assert record.params["compression.fc.rank"] == "1"
+            assert record.params["compression.layer4.0.conv2.rank"] == "1.0"
+        else:
+            assert record.params == {"model": config["model"], "weights": config["weights"]}
         assert client.get_run(run.info.run_id).data.params == run_parameters
         assert not run_parameters.keys() & record.params.keys()
 
         absolute = ("top1_percent", "top5_percent", "cross_entropy_mean", "parameter_count",
                     "parameter_bytes", "latency_median_ms", "latency_p25_ms", "latency_p75_ms")
-        rows = []
-        expected_metrics, expected_model_metrics = {}, {}
-        for variant, offset in (("dense", 1), ("compressed", 2)):
-            row = {"variant": variant, **{key: index + offset for index, key in enumerate(absolute)},
-                   "top1_change_pp": -3.0, "top5_change_pp": -1.0, "examples": 4,
-                   "buffer_bytes": 9, "macro_precision": 0.5, "replaced_parameter_count": 2}
-            rows.append(row)
-            for key in absolute:
-                expected_metrics[f"{variant}.{key}"] = float(row[key])
-                if variant == "compressed":
-                    expected_model_metrics[f"compressed.{key}"] = float(row[key])
-        expected_metrics.update({"compressed.top1_change_pp": -3.0,
-                                 "compressed.top5_change_pp": -1.0, "conversion_seconds": 0.25})
+        row = {key: index + 1 for index, key in enumerate(absolute)}
+        expected_model_metrics = {key: float(value) for key, value in row.items()}
+        expected_metrics = dict(expected_model_metrics)
+        if config["compression"] is not None:
+            row["conversion_seconds"] = 0.25
+            expected_metrics["conversion_seconds"] = 0.25
         # Deliberately enable the SDK's implicit model default to exercise the guard.
         mlflow.set_active_model(model_id=model_id)
-        runner.log_comparison_metrics(rows, 0.25, run.info.run_id, model_id)
+        runner.log_model_metrics(row, run.info.run_id, model_id)
         assert mlflow.get_active_model_id() is None
         assert client.get_run(run.info.run_id).data.metrics == expected_metrics
         model_metrics = client.get_logged_model(model_id).metrics

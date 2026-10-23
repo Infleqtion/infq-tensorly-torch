@@ -1,9 +1,11 @@
 # ImageNet model compression
 
-`run_experiment.py` compares a dense pretrained ResNet-18 with one independently
-compressed copy. It evaluates both on the same saved manifest, measures forward
-latency, verifies a saved compressed model, and uploads the results to one MLflow
-run. Normal execution does not train, fine-tune, search, compile, or generate splits.
+`run_experiment.py` evaluates exactly one configured ResNet-18 model per execution:
+the dense pretrained model, or a compressed copy initialized from those weights.
+It evaluates and times that model once, verifies its saved checkpoint and MLflow
+package, and uploads the results to one run. Compare separate dense and compressed
+runs in the same MLflow experiment using matching manifests and execution settings.
+Normal execution does not train, fine-tune, search, compile, or generate splits.
 Preparation is a separate explicit action. The notebooks and optional comparison
 workflows remain available alongside this script.
 
@@ -19,7 +21,9 @@ root. Commands below assume that root unless stated otherwise.
 experiments/imagenet-compression/
   Model-Compression-Experiment-Plan.md
   run_experiment.py                # preparation, validation, and tracked execution
-  configs/resnet18_exploration.yaml
+  configs/resnet18_exploration.yaml       # Tucker/BlockTT
+  configs/resnet18_exploration_tt.yaml    # TT/BlockTT
+  configs/resnet18_exploration_dense.yaml # dense reference
   data/raw/imagenetv2/             # ignored original images
   data/processed/imagenetv2/       # ignored manifests and preparation metadata
   results/                        # retained historical records
@@ -104,9 +108,17 @@ purposes, and the distinction between recorded exposure and undocumented use.
 Preparation only checks and copies files and hashes; it does not evaluate images
 or create an MLflow run. Normal execution only consumes the supplied manifest.
 
-One YAML describes one dense-versus-compressed comparison. Reusing it creates a
-new MLflow run and a new local timestamp/UUID directory on every execution.
-The original YAML and effective configuration are saved for each run.
+One YAML describes one model evaluation. Reusing it creates a new MLflow run and
+a new local timestamp/UUID directory on every execution. The original YAML and
+effective configuration are saved for each run.
+
+Omit `compression`, or set `compression: null`, to evaluate the dense pretrained
+model. Both become `compression: null` in the effective configuration. A supplied
+mapping must contain a valid implementation and nonempty layer selection; an
+empty or malformed mapping is an error, not a request for dense execution.
+[resnet18_exploration_dense.yaml](configs/resnet18_exploration_dense.yaml) uses the
+same scientific and runtime settings as the compressed example, omits compression,
+and uses run name `resnet18-exploration-dense`.
 
 The example [resnet18_exploration.yaml](configs/resnet18_exploration.yaml) selects
 `layer4.0.conv2` and `layer4.1.conv2` for Tucker conversion with fixed spatial
@@ -158,11 +170,19 @@ not import execution modules, load models/weights, inspect image contents, creat
 outputs, or contact MLflow. File availability and hashes, layer compatibility,
 CUDA availability, artifact access, and serialization are checked during execution.
 
-After local review and the separate Cheetah setup check, the execution command is:
+After review and readiness checks, launch each desired configuration separately:
 
 ```bash
+# Dense reference; this execution never converts a layer.
+uv run --no-sync python experiments/imagenet-compression/run_experiment.py --config experiments/imagenet-compression/configs/resnet18_exploration_dense.yaml
+# Tucker/BlockTT; evaluates only the converted model.
 uv run --no-sync python experiments/imagenet-compression/run_experiment.py --config experiments/imagenet-compression/configs/resnet18_exploration.yaml
+# TT/BlockTT; also evaluates only the converted model.
+uv run --no-sync python experiments/imagenet-compression/run_experiment.py --config experiments/imagenet-compression/configs/resnet18_exploration_tt.yaml
 ```
+
+These commands are independent. The runner never launches a dense reference,
+looks up another run, or calculates cross-run accuracy differences.
 
 The required `tracking.uri` in YAML supplies the HTTP(S) server address; the
 example uses `http://127.0.0.1:9361` on Cheetah. No `MLFLOW_TRACKING_URI` export is
@@ -190,32 +210,33 @@ The **Runs** view shows execution settings as parameters: `device`, `dtype`,
 `evaluation.batch_size`, `runtime.threads`, `seed`, `timing.input_shape`,
 `timing.repeats`, and `timing.warmup`. Their names and encoding are unchanged.
 
-The **Models** view shows the compressed LoggedModel's requested settings as
-model parameters: `model`, `weights`, `implementation`, `compression.layers`,
-and every supplied `compression.<layer>.<option>` field. These include rank,
-factorization, tensorization, fixed-rank modes, and parameter caps. Decomposition
-controls use `compression.<layer>.decomposition_kwargs.<control>`. These settings
-are not duplicated as run parameters. Integer rank `1` stays `1`, floating-point
-target `1.0` stays `1.0`, and lists use deterministic JSON. Actual ranks, effective
-decomposition settings, storage, and reconstruction errors remain in the report.
+The **Models** view shows one LoggedModel named `model` for either execution type.
+Its model parameters always include `model` and `weights`. Compressed models also
+record `implementation`, `compression.layers`, and every supplied
+`compression.<layer>.<option>` field: rank, factorization, tensorization, fixed-rank
+modes, and parameter caps. Decomposition controls use
+`compression.<layer>.decomposition_kwargs.<control>`. Dense models receive no
+invented compression settings. Model settings are not duplicated as run parameters.
+Integer rank `1` stays `1`, floating-point target `1.0` stays `1.0`, and lists use
+deterministic JSON. Actual ranks, effective fitting settings, storage, and weight
+reconstruction errors remain in the compression report when conversion occurs.
 
-Only the following existing metrics appear on the run dashboard:
+Both execution types log the same eight unprefixed metrics on the run and associate
+them with that run's model ID:
 
-| Metric suffix | Prefixes |
+| Measurement | Metric names |
 | --- | --- |
-| `top1_percent`, `top5_percent`, `cross_entropy_mean` | `dense.`, `compressed.` |
-| `parameter_count`, `parameter_bytes` | `dense.`, `compressed.` |
-| `latency_median_ms`, `latency_p25_ms`, `latency_p75_ms` | `dense.`, `compressed.` |
-| `top1_change_pp`, `top5_change_pp` | `compressed.` |
+| Accuracy and loss | `top1_percent`, `top5_percent`, `cross_entropy_mean` |
+| Parameter storage | `parameter_count`, `parameter_bytes` |
+| Latency | `latency_median_ms`, `latency_p25_ms`, `latency_p75_ms` |
 
-`conversion_seconds` remains a run metric. The eight compressed absolute metrics
-are also associated with the compressed model's ID, so Models can compare its
-accuracy, storage, and latency. Dense metrics, accuracy deltas, and conversion
-time remain run-only results. Counts of evaluated/correct images, macro metrics,
-buffer bytes, replaced-layer totals, and dense zero deltas remain in measurements,
-CSV, and compression reports; they are no longer dashboard metrics. Measurements
-are unchanged: logged metrics keep full precision, while the CSV retains its
-existing formatting (percentages/deltas to two decimals and latencies to three).
+Compressed runs additionally log `conversion_seconds` on the run only. Dense runs
+omit it because no conversion was measured. Future results have no accuracy-delta
+fields or automatically evaluated baseline. Compare models through their common
+metric names in MLflow, keeping the evaluation partition and runtime settings fixed.
+Detailed image counts, macro metrics, buffer bytes, and raw timing samples remain
+in artifacts; replaced-layer diagnostics remain in compression reports. Metric
+values retain full precision; CSV percentages use two decimals and latencies three.
 
 `evaluation.workers` and `timing_seed` remain in configuration/provenance artifacts,
 not searchable parameters. Tags `git.branch` and `git.commit` identify the recorded
@@ -227,15 +248,16 @@ With MLflow 3.17.2, ordinary model logging copies existing run parameters onto a
 new model. The runner instead initializes one LoggedModel with its model settings
 and passes that same ID to PyTorch model logging. Run parameters can therefore
 remain available early for failed runs without leaking onto the model. Only one
-run and one compressed model are created; no baseline model or Registry entry is
+run and one model are created; no additional baseline model or Registry entry is
 added. The complete configuration is still uploaded before model loading, so
 failed conversions retain all requested settings even before a Model exists.
 
 MLflow also infers metric associations and copies existing step-zero metrics when
 logging a model. The runner logs metrics after model packaging, clears the implicit
 active-model default, and uses a synchronous client batch with explicit model IDs
-only on compressed absolute metrics. Passing `model_id=None` to fluent metric
-logging alone would not prevent unwanted associations. The tested behavior uses
+on all eight absolute metrics. Conversion time has no model ID. Passing
+`model_id=None` to fluent metric logging alone would not prevent unwanted
+associations. The tested behavior uses
 MLflow 3.17.2's LoggedModel initialization, existing-model logging, and metric-ID
 APIs; the tracking server must support them. An isolated temporary file-store test
 checks real SDK behavior without a server or added dependencies. The file-store
@@ -282,11 +304,13 @@ must still be used according to their intended purposes.
 
 Preprocessing is the transform associated with
 `ResNet18_Weights.IMAGENET1K_V1`. Runtime seed `2026` seeds Python, NumPy, and
-PyTorch; timing input uses a separate local generator with seed `2027`. Both
-models execute eagerly in float32 with opt_einsum disabled. The runner checks
-the baseline's parameters and buffers before and after conversion and evaluation.
+PyTorch; timing input uses a separate local generator with seed `2027`. The selected
+model executes eagerly in float32 with opt_einsum disabled. Compressed execution
+checks that conversion and measurement preserve the pretrained source's parameters
+and buffers, without evaluating or timing that source. Dense execution uses that
+source directly and checks its state after measurement.
 
-Accuracy is reported as top-1/top-5 percentages and changes in percentage points.
+Accuracy is reported as top-1/top-5 percentages, without cross-run differences.
 Cross-entropy is summed over images and divided by the total, so a smaller final
 batch is weighted correctly. Macro precision, recall, and F1 are the unweighted
 means across all output classes, including classes absent from the manifest.
@@ -296,15 +320,23 @@ Timing uses a preallocated input on the selected device, evaluation/inference
 mode, 20 warm-ups, and 100 measurements of batches of one. CUDA is synchronized
 around each measurement. Median and inclusive quartiles are milliseconds per
 batch; raw samples are retained. Loading, image transforms, transfers, and
-conversion are excluded; conversion time is recorded separately. Storage is
-taken directly from the public compression report, including biases, buffers,
-frozen parameters, and shared-object counting. FLOPs remain unavailable (`null`,
-not zero): coverage of factorized contractions has not been validated.
+conversion are excluded; conversion time is recorded separately only when it
+occurs. Compressed storage comes from the public compression report. Dense storage
+reuses the same library accounting helper directly, without a conversion or model
+copy. Both count biases, buffers, frozen parameters, and shared tensor objects in
+the same way. FLOPs remain unavailable (`null`, not zero): coverage of factorized contractions has not been validated.
 
 Each output directory contains original/effective configuration, the exact
-manifest, a two-row CSV, a readable report, detailed measurements, raw timings,
-compression/storage/error reports, and provenance. Provenance includes manifest
-and cached-weight hashes, preprocessing, seeds, versions, hardware, backends,
+manifest, a one-row `results.csv`, a readable `report.md`, detailed measurements,
+raw timings, one verified `model.pt`, and provenance. `measurements.json` contains
+one `variant` (`dense` or `compressed`), `accuracy`, `latency`, and `storage` record;
+only compressed measurements and CSVs include `conversion_seconds`.
+`latency_samples.json` is that model's list of raw millisecond samples.
+`compression_report.json` exists only after conversion and retains original versus
+factorized weight/storage diagnostics, including replaced-layer totals. These
+weight diagnostics do not require inference on the original model. No new result
+contains an accuracy delta; historical artifact formats remain unchanged.
+Provenance includes manifest and cached-weight hashes, preprocessing, seeds, versions, hardware, backends,
 Git branch/commit/status, and a source archive. The archive contains the exact
 committed execution inputs described below, with per-file SHA-256 hashes. It
 excludes datasets, environments, historical runs, and unrelated personal files.
@@ -319,10 +351,9 @@ use these hashes to identify exact artifacts. `manifest_sha256` stays in provena
 commit stays in those records and the existing `git.commit` tag. None of these
 hashes or the old `git_commit` field are logged as run parameters or new tags.
 
-`compressed_model.pt` contains the actual model architecture, parameters, and
-buffers, not instructions to decompose again. PyTorch's full-model serialization
-was checked with Tucker convolutions and BlockTT linear layers. The runner loads
-an independent copy, compares every parameter and buffer exactly (including
+`model.pt` contains the actual model architecture, parameters, and buffers, not
+instructions to decompose again. The same full-model save/load path supports dense,
+Tucker/BlockTT, and TT/BlockTT models. The runner loads an independent copy, compares every parameter and buffer exactly (including
 nonpersistent buffers), checks factorization types/ranks, and compares outputs
 on a fixed input with `rtol=1e-5`, `atol=1e-6`. It records the result in
 `model_verification.json` and saves the input/expected output in
@@ -339,13 +370,15 @@ import sys
 # Use the absolute experiment path if running outside the repository root.
 experiment_directory = Path("experiments/imagenet-compression").resolve()
 sys.path.insert(0, str(experiment_directory))
-from run_experiment import load_compressed_model
+from run_experiment import load_model
 
-model = load_compressed_model("/path/to/run/compressed_model.pt", device="cpu")
+model = load_model("/path/to/run/model.pt", device="cpu")
 ```
 
-Loading calls neither pretrained-weight loading nor decomposition. The checkpoint
-uses pickle with `weights_only=False`; load only trusted artifacts. It depends on
+The previous `load_compressed_model` helper remains available for trusted historical
+`compressed_model.pt` files; it delegates to the same loader. Historical files do
+not need renaming. Loading calls neither pretrained-weight loading nor decomposition.
+The checkpoint uses pickle with `weights_only=False`; load only trusted artifacts. It depends on
 matching PyTorch, TorchVision, TensorLy, and TensorLy-Torch code, rather than being
 a portable interchange format. Downloading it from the real MLflow server and
 verifying it in Cheetah's environment remain part of the later Cheetah test.
@@ -360,7 +393,7 @@ checkpoint portability across package versions. Source archives and Git provenan
 independent of the caller's working directory. The archive and automatic commit
 use the same explicit execution scope.
 
-The runner also calls `mlflow.pytorch.log_model(..., name="compressed_model",
+The runner also calls `mlflow.pytorch.log_model(..., name="model",
 serialization_format="pickle")` in the same active run, after checkpoint
 verification. MLflow 3.17.2 otherwise defaults to `.pt2` outside Databricks;
 the explicit pickle choice retains the actual factorized modules and weights.
@@ -395,8 +428,8 @@ model = mlflow.pytorch.load_model(model_uri, map_location="cpu", weights_only=Fa
 
 Loading uses the packaged `tltorch` code and does not repeat decomposition.
 Pickle packages require trusted artifacts and matching installed dependencies.
-Offline tests exercise MLflow's real save/load code with Tucker/BlockTT and
-TT/BlockTT models, including fresh processes. They do not establish server-side
+Offline tests exercise MLflow's real save/load code with dense, Tucker/BlockTT,
+and TT/BlockTT models, including fresh processes. They do not establish server-side
 Model permissions or promise portability across arbitrary package versions.
 
 ## Local execution commits
@@ -472,9 +505,10 @@ Change `tracking.uri` in a configuration intended for another server.
 The shared server is managed separately. MLflow automatically reads the existing
 `/home/rafael/.mlflow/credentials`; do not copy credentials into the checkout,
 YAML, command line, or artifacts. An authenticated workspace-listing request has
-succeeded for `quirc`. Creating experiments/runs and uploading/downloading
-artifacts still await the first real comparison. Browser login alone does not
-verify the Python client's access.
+succeeded for `quirc`. This single-model refactor is validated offline; it has not
+been deployed or exercised against the shared server. Keep existing completed
+runs unchanged, and check client/server and artifact access before new execution.
+Browser login alone does not verify the Python client's access.
 
 After this implementation is reviewed and committed, transfer that exact commit
 by a normal SSH push/fetch or a Git bundle and fast-forward the clean dedicated
@@ -532,12 +566,16 @@ cd /home/rafael/projects/infq-tensorly-torch
 ```
 
 After checking available GPU capacity and reviewing pending source/configuration
-changes, manually start the comparison with:
+changes, manually start the selected model evaluation with:
 
 ```bash
 cd /home/rafael/projects/infq-tensorly-torch
 /home/rafael/.local/bin/uv run --no-sync python experiments/imagenet-compression/run_experiment.py --config experiments/imagenet-compression/configs/resnet18_exploration.yaml
 ```
+
+Use `resnet18_exploration_dense.yaml` for a separate dense run or
+`resnet18_exploration_tt.yaml` for TT/BlockTT. Each command evaluates only its selected
+model. No cache or tracking exports are required.
 
 This command may create a local execution-input commit, then starts one tracked run.
 A Git commit failure stops it before tracking or model execution. The YAML selects `cuda:0`, evaluation batches
