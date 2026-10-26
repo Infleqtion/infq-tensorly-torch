@@ -125,3 +125,34 @@ tensor([[-0.0009,  0.0004],
         [ 0.0007,  0.0003]], grad_fn=<SqueezeBackward0>)
 
 Again, notice that gradients are tracked and all operations on factorized and tensorized tensors are back-propagatable!
+
+TT weight-storage targets
+-------------------------
+
+For TT and BlockTT, a positive floating-point ``rank`` requests a fraction of
+original weight-tensor elements. ``'same'`` means ``1.0``. The integer parameter
+budget is rounded down. Biases and unchanged layers are outside this budget;
+complex weights are counted in complex elements. BlockTT uses merged physical
+modes for its cores but counts source batch dimensions only once in the budget.
+
+Fractional requests now select ranks that respect unfolding dimensions and both
+neighboring-rank constraints before allocation or TT-SVD. Previously, TensorLy's
+fractional heuristic could select oversized ranks that decomposition clipped,
+leaving much of the intended storage unused. Fractional requests can therefore
+produce different ranks and numerical approximations than earlier releases.
+Explicit integer and tuple/list requests retain their rank-cap semantics,
+including dimension-based clipping during decomposition.
+
+Selection starts with the largest fitting capped common-rank profile, found by
+binary search. Up to eight refinement passes consider increasing one bond or
+reducing one bond by one while increasing another. Counts must strictly improve;
+equal-count candidates prefer the least total absolute change from the starting
+profile, then lexicographic order. This is a bounded storage heuristic, not a
+globally optimal rank search or an accuracy/latency optimizer.
+
+Budgets below the rank-one representation raise an error. Positive targets above
+``1.0`` are supported; selection saturates when the largest feasible representation
+fits within the budget. Integer steps and the bounded search can leave unused
+budget. Such gaps are not necessarily mathematically unavoidable, and exact
+attainment is not promised. Inspect the actual ranks and sum the core sizes to
+obtain achieved storage; subtract that count from the floored budget for the gap.

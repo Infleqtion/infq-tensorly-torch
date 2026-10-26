@@ -354,7 +354,8 @@ def test_tucker_spatial_rank_conflict_prevents_all_conversion(rank, monkeypatch)
     assert calls == []
 
 
-@pytest.mark.parametrize("rank,expected", [(1, (1, 1, 1)), (1.0, (1, 3, 1))])
+# Merged modes (12, 20) cost 32*r: a 240-weight budget fits rank 7, not 8.
+@pytest.mark.parametrize("rank,expected", [(1, (1, 1, 1)), (1.0, (1, 7, 1))])
 def test_integer_rank_and_float_target_keep_distinct_meanings(rank, expected):
     torch.manual_seed(15)
     converted, report = compress_model(nn.Linear(12, 20), {

@@ -250,8 +250,14 @@ def test_single_pair_blocktt_checks_explicit_boundary_ranks():
 
 def test_explicit_singleton_modes_are_not_automatically_compression():
     source = nn.Linear(5, 7, bias=False, dtype=torch.float64)
+    # Even rank one costs 36 weights, above floor(0.5 * 35) = 17.
+    with pytest.raises(ValueError, match="budget 17.*rank-one.*36"):
+        FactorizedLinear.from_linear(
+            source, factorization="BlockTT", rank=0.5, auto_tensorize=False,
+            in_tensorized_features=(5, 1), out_tensorized_features=(7, 1),
+        )
     converted = FactorizedLinear.from_linear(
-        source, factorization="BlockTT", rank=0.5, auto_tensorize=False,
+        source, factorization="BlockTT", rank=1, auto_tensorize=False,
         in_tensorized_features=(5, 1), out_tensorized_features=(7, 1),
     )
     torch.testing.assert_close(converted.weight.to_matrix(), source.weight)
