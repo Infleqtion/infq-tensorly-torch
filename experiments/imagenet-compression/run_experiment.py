@@ -31,7 +31,8 @@ import zipfile
 
 import yaml
 
-from execution_inputs import snapshot_execution_inputs, verify_execution_inputs
+from execution_inputs import configuration_files, snapshot_execution_inputs, verify_execution_inputs
+from runner_status import validate_status_path, start_status, update_status, fail_status, finish_status
 
 EXPERIMENT_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = EXPERIMENT_DIR.parents[1]
@@ -718,7 +719,7 @@ def save_and_verify_model(model, report, inputs, output):
     return verification
 
 
-def log_and_verify_mlflow_model(model, report, inputs, output, *, parameters=None):
+def log_and_verify_mlflow_model(model, report, inputs, output, *, parameters=None, status=None):
     """Log the measured model as trusted pickle, then verify an independent reload."""
     import torch
     import mlflow.pytorch
@@ -746,6 +747,7 @@ def log_and_verify_mlflow_model(model, report, inputs, output, *, parameters=Non
                 destination.write_bytes(source.read_bytes())
         # Passing an existing model ID avoids log_model's automatic run-parameter copy.
         logged_model = mlflow.initialize_logged_model(name="model", params=parameters or {})
+        update_status(status, model_id=logged_model.model_id)
         info = mlflow.pytorch.log_model(
             model, name="model", model_id=logged_model.model_id, serialization_format="pickle",
             input_example=example, signature=signature, pip_requirements=requirements,
@@ -757,6 +759,7 @@ def log_and_verify_mlflow_model(model, report, inputs, output, *, parameters=Non
         run = json.loads((output / "run.json").read_text())
         run["mlflow_model"] = metadata
         write_json(output / "run.json", run)
+        update_status(status, model_uri=info.model_uri)
         print(f"MLflow model: {info.model_uri}", flush=True)
         loaded = mlflow.pytorch.load_model(
             info.model_uri, dst_path=temporary, map_location=inputs.device, weights_only=False)
@@ -917,7 +920,7 @@ def log_model_metrics(row, run_id, model_id):
     mlflow.MlflowClient().log_batch(run_id, metrics=metrics, synchronous=True)
 
 
-def run_experiment(config, original_config, *, config_path):
+def run_experiment(config, original_config, *, config_path, provenance_configs=None, status=None):
     """Validate inputs, commit sources, then track, select, measure, verify, and upload one model.
 
     Tests record the MLflow calls offline; execution requires the configured server.
@@ -927,6 +930,8 @@ def run_experiment(config, original_config, *, config_path):
     from tltorch import compress_model
     from tltorch.utils.model_compression import _measure_storage
 
+    provenance_configs = provenance_configs or {}
+    update_status(status, phase="preflight")
     tracking = config["tracking"]
     validate_tracking_uri(tracking["uri"])
     manifest, manifest_bytes = read_manifest(config["data"]["raw_dir"], config["data"]["manifest"])
@@ -940,6 +945,7 @@ def run_experiment(config, original_config, *, config_path):
     np.random.seed(runtime["seed"])
     torch.manual_seed(runtime["seed"])
     output = create_output(config["output_root"], run_directory_name())
+    update_status(status, output_directory=str(output.resolve()))
     (output / "original_config.yaml").write_bytes(original_config)
     write_json(output / "effective_config.json", config)
     (output / "evaluation_manifest.json").write_bytes(manifest_bytes)
@@ -960,18 +966,23 @@ def run_experiment(config, original_config, *, config_path):
             raise ValueError("End the active MLflow run before starting this execution")
         if load_config(config_path)[0] != config:
             raise ValueError("Effective configuration differs from the selected YAML; reload it before execution")
+        update_status(status, phase="snapshot")
         snapshot = snapshot_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path,
-                                             original_config, tracking["run_name"])
+                                             original_config, tracking["run_name"],
+                                             provenance_configs=provenance_configs)
         revision = save_source(output, snapshot)
+        update_status(status, phase="tracking_setup")
         mlflow.set_tracking_uri(tracking["uri"])
         mlflow.set_workspace(tracking["workspace"])
         experiment = mlflow.set_experiment(tracking["experiment_name"])
         experiment_id = experiment.experiment_id
+        update_status(status, experiment_id=experiment_id)
         tags = {"tracking.workspace": tracking["workspace"], "git.branch": revision["branch"],
                 "git.commit": revision["commit"]}
         with mlflow.start_run(experiment_id=experiment_id, run_name=tracking["run_name"], tags=tags) as run:
             run_id = run.info.run_id
             try:
+                update_status(status, state="running", phase="early_uploads", run_id=run_id)
                 write_json(output / "run.json", {"workspace": tracking["workspace"],
                                                  "experiment_id": experiment_id, "run_id": run_id,
                                                  **configuration_hashes})
@@ -981,10 +992,16 @@ def run_experiment(config, original_config, *, config_path):
                 mlflow.log_artifact(str(output / "effective_config.json"))
                 for filename in ("original_config.yaml", "run.json", "source.json", "source.zip"):
                     mlflow.log_artifact(str(output / filename))
+                for name, contents in provenance_configs.items():
+                    destination = output / "provenance_configs" / name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(contents)
+                    mlflow.log_artifact(str(destination), artifact_path=destination.parent.relative_to(output).as_posix())
                 run_parameters, model_parameters = requested_parameters(config)
                 for key, value in run_parameters.items():
                     mlflow.log_param(key, value, synchronous=True)
 
+                update_status(status, phase="model_loading")
                 source, preprocessing = load_cached_baseline(weight_path, device)
                 original_state = model_fingerprint(source)
                 environment = environment_info()
@@ -1003,6 +1020,7 @@ def run_experiment(config, original_config, *, config_path):
                               "flops": FLOPS, "execution": "eager; no torch.compile",
                               "macro_metrics": "Unweighted mean across all model output classes. Undefined precision, recall, and F1 are zero.",
                               "latency_units": "milliseconds per batch; excludes loading, preprocessing, transfers, and conversion"}
+                update_status(status, phase="input_provenance")
                 write_json(output / "provenance.json", provenance)
                 for filename in ("evaluation_manifest.json", "provenance.json"):
                     mlflow.log_artifact(str(output / filename))
@@ -1011,6 +1029,7 @@ def run_experiment(config, original_config, *, config_path):
                 model, report = source, None
                 conversion_seconds = None
                 if compression is not None:
+                    update_status(status, phase="conversion")
                     if device.type == "cuda":
                         torch.cuda.synchronize(device)
                     started = time.perf_counter()
@@ -1028,6 +1047,7 @@ def run_experiment(config, original_config, *, config_path):
                     # Reuse the library's tensor accounting without copying or converting dense models.
                     storage = _measure_storage([model])
 
+                update_status(status, phase="measurement")
                 batches = make_loader(config["data"]["raw_dir"], manifest, preprocessing,
                                       batch_size=runtime["batch_size"], workers=runtime["workers"], seed=runtime["seed"])
                 inputs = torch.randn(*timing["input_shape"], device=device, dtype=torch.float32,
@@ -1046,16 +1066,21 @@ def run_experiment(config, original_config, *, config_path):
                 write_json(output / "latency_samples.json", measurement["latency"]["samples_ms"])
                 (output / "report.md").write_text(single_model_table(row) + "\n\n" + provenance["macro_metrics"] +
                                                   "\n\nFLOPs unavailable: " + FLOPS["reason"] + "\n")
+                update_status(status, phase="checkpoint_verification")
                 save_and_verify_model(model, report, inputs, output)
                 verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
+                update_status(status, phase="mlflow_model_verification")
                 model_verification = log_and_verify_mlflow_model(
-                    model, report, inputs, output, parameters=model_parameters)
+                    model, report, inputs, output, parameters=model_parameters, status=status)
                 verification = verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
                 write_json(output / "execution_inputs_verification.json", verification)
+                update_status(status, phase="metric_upload")
                 log_model_metrics(row, run_id, model_verification["model_id"])
                 # The run remains open until checkpoint verification and every required upload succeed.
+                update_status(status, phase="artifact_upload")
                 mlflow.log_artifacts(str(output))
                 verify_execution_inputs(REPOSITORY_ROOT, EXPERIMENT_DIR, config_path, revision)
+                update_status(status, phase="run_finalization")
             except BaseException as error:
                 # MLflow's context exit can itself fail while updating run status.
                 operation_error = error
@@ -1295,6 +1320,9 @@ def main(argv=None):
     action.add_argument("--config", type=Path, help="YAML filename, relative to the caller's working directory")
     action.add_argument("--prepare-data", action="store_true", help="Prepare data only, without models or tracking")
     parser.add_argument("--dry-run", action="store_true", help="Validate configuration without execution")
+    parser.add_argument("--status-file", type=Path, help="New absolute receipt path in an existing writable directory")
+    parser.add_argument("--provenance-config", type=Path, action="append", default=[],
+                        help="Additional YAML under configs/ to snapshot and archive; repeat as needed")
     parser.add_argument("--source-dir", type=Path, help="Existing extracted dataset to copy; no downloads")
     parser.add_argument("--raw-dir", type=Path, help="Preparation output; defaults to this experiment's data/raw/imagenetv2")
     parser.add_argument("--processed-dir", type=Path, help="New preparation output; defaults to data/processed/imagenetv2")
@@ -1302,6 +1330,8 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, help="Preparation seed; defaults to 20261019")
     args = parser.parse_args(argv)
     if args.prepare_data:
+        if args.status_file is not None or args.provenance_config:
+            parser.error("Status and provenance options require --config")
         if args.dry_run:
             parser.error("--dry-run describes a --config; it cannot be combined with --prepare-data")
         raw = args.raw_dir or EXPERIMENT_DIR / "data/raw/imagenetv2"
@@ -1319,15 +1349,32 @@ def main(argv=None):
     if any(value is not None for value in (args.source_dir, args.raw_dir, args.processed_dir,
                                            args.exploration_manifest, args.seed)):
         parser.error("Preparation options require --prepare-data")
+    status = None
     try:
+        if args.status_file is not None:
+            validate_status_path(args.status_file)
         config, original = load_config(args.config)
+        extra_names = (configuration_files(REPOSITORY_ROOT, EXPERIMENT_DIR, args.provenance_config)
+                       if args.provenance_config else [])
+        selected = args.config.expanduser().resolve()
+        provenance_configs = {name: (REPOSITORY_ROOT / name).read_bytes() for name in extra_names
+                              if (REPOSITORY_ROOT / name).resolve() != selected}
         if args.dry_run:
             print(describe(config))
             return 0
-        output = run_experiment(config, original, config_path=args.config)
+        if args.status_file is not None:
+            status = start_status(args.status_file, args.config, original, config["tracking"])
+        output = run_experiment(config, original, config_path=args.config,
+                                provenance_configs=provenance_configs, status=status)
+        # A finished tracking run stays intact if publishing this local receipt fails.
+        update_status(status, phase="completion_receipt")
+        finish_status(status, output)
         print(f"Completed model evaluation; all required artifacts uploaded. Local files: {output}")
         return 0
-    except Exception as error:
+    except BaseException as error:
+        fail_status(status, error)
+        if not isinstance(error, Exception):
+            raise
         print(f"Experiment failed: {error}", file=sys.stderr)
         return 1
 

@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import csv
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -314,7 +315,7 @@ class RecordingMlflow:
         self.active_run_id = None
         self.set_terminated("run-1", status)
 
-    def log_artifact(self, path, *, run_id=None):
+    def log_artifact(self, path, *, run_id=None, artifact_path=None):
         path = Path(path)
         assert (run_id or self.active_run_id) == "run-1" and path.is_file()
         self.events.append(f"upload {path.name}")
@@ -322,7 +323,8 @@ class RecordingMlflow:
             raise OSError("configuration upload failed")
         if self.fail in ("failure upload", "both") and path.name == "failure.json":
             raise OSError("diagnostic upload failed")
-        self.uploads[path.name] = path.read_bytes()
+        key = f"{artifact_path}/{path.name}" if artifact_path else path.name
+        self.uploads[key] = path.read_bytes()
 
     def log_param(self, key, value, **kwargs):
         assert kwargs["synchronous"] and isinstance(value, str)
@@ -1183,3 +1185,336 @@ def test_metric_upload_failure_keeps_original_error_and_diagnostics(execution, m
     assert caught.value is error
     assert events[-2:] == ["upload failure.json", "FAILED"] and "FINISHED" not in events
     assert json.loads(tracking.uploads["failure.json"])["error"] == "metric upload failed"
+
+
+
+def test_optional_receipt_and_extra_configurations_complete_after_run_exit(execution, monkeypatch, tracking, tmp_path):
+    config, original, _, events = execution
+    selected = runner.EXPERIMENT_DIR / "configs/test.yaml"
+    status_path = tmp_path / "runner_status.json"
+    extras = []
+    for folder, contents in (("studies", "study: example\n"), ("templates", "template: dense\n")):
+        path = runner.EXPERIMENT_DIR / f"configs/{folder}/settings.yaml"
+        path.parent.mkdir()
+        path.write_text(contents)
+        extras.append(path)
+    unrelated = runner.EXPERIMENT_DIR / "configs/personal.yaml"
+    unrelated.write_text("personal: do not collect\n")
+    load = runner.load_cached_baseline
+    def check_early_uploads(*args):
+        receipt = json.loads(status_path.read_text())
+        assert receipt["state"] == "running" and receipt["phase"] == "model_loading"
+        archive = zipfile.ZipFile(io.BytesIO(tracking.uploads["source.zip"]))
+        for path in extras:
+            name = path.relative_to(runner.REPOSITORY_ROOT).as_posix()
+            assert tracking.uploads[f"provenance_configs/{name}"] == path.read_bytes()
+            assert archive.read(name) == path.read_bytes()
+            assert archive.namelist().count(name) == 1
+        assert archive.namelist().count(selected.relative_to(runner.REPOSITORY_ROOT).as_posix()) == 1
+        assert unrelated.relative_to(runner.REPOSITORY_ROOT).as_posix() not in archive.namelist()
+        return load(*args)
+    monkeypatch.setattr(runner, "load_cached_baseline", check_early_uploads)
+    upload = tracking.log_artifacts
+    def check_final_upload(path):
+        receipt = json.loads(status_path.read_text())
+        assert receipt["state"] == "running" and receipt["phase"] == "artifact_upload"
+        assert json.loads((Path(path) / "model_verification.json").read_text())["passed"]
+        assert json.loads((Path(path) / "mlflow_model_verification.json").read_text())["passed"]
+        upload(path)
+    monkeypatch.setattr("mlflow.log_artifacts", check_final_upload)
+    terminate = tracking.set_terminated
+    def check_context_exit(run_id, status):
+        receipt = json.loads(status_path.read_text())
+        assert status == "FINISHED" and receipt["state"] == "running"
+        assert receipt["phase"] == "run_finalization" and events[-1] == "all artifacts"
+        terminate(run_id, status)
+    monkeypatch.setattr(tracking, "set_terminated", check_context_exit)
+    arguments = ["--config", str(selected), "--status-file", str(status_path)]
+    for path in [*extras, extras[0], selected]:
+        arguments += ["--provenance-config", str(path)]
+    assert runner.main(arguments) == 0
+    receipt = json.loads(status_path.read_text())
+    assert receipt["schema_version"] == 1 and receipt["state"] == "succeeded"
+    assert receipt["phase"] == "completed" and receipt["failure"] is None
+    assert receipt["configuration_sha256"] == hashlib.sha256(original).hexdigest()
+    assert receipt["configuration_path"] == str(selected)
+    assert receipt["process"]["pid"] == os.getpid() and receipt["process"]["hostname"]
+    assert receipt["tracking_uri"] == config["tracking"]["uri"] and receipt["workspace"] == "quirc"
+    assert (receipt["experiment_id"], receipt["run_id"], receipt["model_id"]) == ("experiment-1", "run-1", "model-1")
+    output = Path(receipt["output_directory"])
+    assert receipt["model_uri"] == json.loads((output / "run.json").read_text())["mlflow_model"]["model_uri"]
+    for name, entry in receipt["artifacts"].items():
+        assert Path(entry["path"]) == output / name
+        assert entry["sha256"] == hashlib.sha256((output / name).read_bytes()).hexdigest()
+    assert tracking.run_count == tracking.model_count == 1 and events[-1] == "FINISHED"
+    assert set(tracking.params) == {"device", "dtype", "evaluation.batch_size", "runtime.threads",
+                                    "seed", "timing.input_shape", "timing.repeats", "timing.warmup"}
+    assert set(tracking.tags) == {"tracking.workspace", "git.branch", "git.commit"}
+
+
+@pytest.mark.parametrize("failure,phase", [
+    ("preflight", "preflight"), ("workspace", "tracking_setup"),
+    ("early upload", "early_uploads"),
+    ("conversion", "conversion"), ("checkpoint", "checkpoint_verification"),
+    ("model initialization", "mlflow_model_verification"),
+    ("model logging", "mlflow_model_verification"),
+    ("model verification", "mlflow_model_verification"),
+    ("late upload", "artifact_upload"), ("finish", "run_finalization"),
+])
+def test_failed_execution_never_publishes_success_receipt(execution, monkeypatch, tracking, tmp_path, failure, phase):
+    config, _, _, events = execution
+    tracking.fail = failure
+    if failure == "preflight":
+        def missing_weights():
+            raise FileNotFoundError("missing cached weights")
+        monkeypatch.setattr(runner, "cached_weights", missing_weights)
+    elif failure == "workspace":
+        def inaccessible_workspace(value):
+            raise PermissionError("workspace unavailable")
+        monkeypatch.setattr("mlflow.set_workspace", inaccessible_workspace)
+    elif failure == "conversion":
+        def fail_conversion(*args, **kwargs):
+            raise RuntimeError("conversion failed") from ValueError("fit failed")
+        monkeypatch.setattr(tltorch, "compress_model", fail_conversion)
+    elif failure == "checkpoint":
+        def fail_checkpoint(*args):
+            raise RuntimeError("checkpoint verification failed")
+        monkeypatch.setattr(runner, "save_and_verify_model", fail_checkpoint)
+    status_path = tmp_path / "runner_status.json"
+    assert runner.main(["--config", str(runner.EXPERIMENT_DIR / "configs/test.yaml"),
+                        "--status-file", str(status_path)]) == 1
+    receipt = json.loads(status_path.read_text())
+    assert receipt["state"] == "failed" and receipt["phase"] == phase
+    assert "artifacts" not in receipt and receipt["failure"]["exception_type"].startswith("builtins.")
+    if failure == "preflight":
+        assert receipt["output_directory"] is None and not events
+        assert all(receipt[key] is None for key in ("experiment_id", "run_id", "model_id", "model_uri"))
+    elif failure == "workspace":
+        assert receipt["output_directory"] is not None and receipt["run_id"] is None
+        assert receipt["experiment_id"] is None and receipt["model_id"] is None
+        assert "start" not in events
+    else:
+        assert receipt["run_id"] == "run-1" and events[-1] == "FAILED"
+        assert json.loads((Path(receipt["output_directory"]) / "failure.json").read_text())["run_id"] == "run-1"
+        if failure in ("early upload", "conversion", "checkpoint", "model initialization"):
+            assert receipt["model_id"] is None and receipt["model_uri"] is None
+        elif failure == "model logging":
+            assert receipt["model_id"] == "model-1" and receipt["model_uri"] is None
+        else:
+            assert receipt["model_id"] == "model-1" and receipt["model_uri"]
+    if failure == "conversion":
+        assert receipt["failure"]["cause_types"] == ["builtins.ValueError"]
+
+
+def test_failure_receipt_write_error_preserves_original_exception_and_cause(execution, monkeypatch, tmp_path, capsys):
+    import runner_status
+    original, cause = RuntimeError("original conversion error"), ValueError("original cause")
+    def fail_conversion(*args, **kwargs):
+        raise original from cause
+    monkeypatch.setattr(tltorch, "compress_model", fail_conversion)
+    update = runner_status.update_status
+    def reject_failure(receipt, **changes):
+        if changes.get("state") == "failed":
+            raise OSError("receipt write failed")
+        update(receipt, **changes)
+    monkeypatch.setattr(runner_status, "update_status", reject_failure)
+    fail = runner.fail_status
+    observed = []
+    def record_error(receipt, error):
+        observed.append(error)
+        fail(receipt, error)
+    monkeypatch.setattr(runner, "fail_status", record_error)
+    status_path = tmp_path / "runner_status.json"
+    assert runner.main(["--config", str(runner.EXPERIMENT_DIR / "configs/test.yaml"),
+                        "--status-file", str(status_path)]) == 1
+    assert observed == [original] and original.__cause__ is cause
+    assert json.loads(status_path.read_text())["state"] == "running"
+    stderr = capsys.readouterr().err
+    assert "Failure receipt could not be updated" in stderr and "original conversion error" in stderr
+
+
+def test_final_receipt_write_failure_keeps_finished_run_and_artifacts(execution, monkeypatch, tracking, tmp_path):
+    import runner_status
+    update = runner_status.update_status
+    def reject_success(receipt, **changes):
+        if changes.get("state") == "succeeded":
+            raise OSError("final receipt write failed")
+        update(receipt, **changes)
+    monkeypatch.setattr(runner_status, "update_status", reject_success)
+    status_path = tmp_path / "runner_status.json"
+    assert runner.main(["--config", str(runner.EXPERIMENT_DIR / "configs/test.yaml"),
+                        "--status-file", str(status_path)]) == 1
+    receipt = json.loads(status_path.read_text())
+    assert receipt["state"] == "failed" and receipt["phase"] == "completion_receipt"
+    assert receipt["failure"]["exception_type"] == "builtins.OSError"
+    assert tracking.events[-1] == "FINISHED" and "FAILED" not in tracking.events
+    output = Path(receipt["output_directory"])
+    assert not (output / "failure.json").exists() and (output / "model.pt").is_file()
+    assert "model.pt" in tracking.uploads
+
+
+def test_existing_status_destination_is_preserved_before_snapshot(execution, tmp_path, tracking):
+    status_path = tmp_path / "runner_status.json"
+    status_path.write_text("existing owner's file\n")
+    before = runner.git("rev-parse", "HEAD")
+    assert runner.main(["--config", str(runner.EXPERIMENT_DIR / "configs/test.yaml"),
+                        "--status-file", str(status_path)]) == 1
+    assert status_path.read_text() == "existing owner's file\n"
+    assert runner.git("rev-parse", "HEAD") == before and tracking.events == []
+
+
+def test_extra_configuration_changed_during_preflight_prevents_snapshot(execution, monkeypatch, tracking, tmp_path):
+    extra = runner.EXPERIMENT_DIR / "configs/study.yaml"
+    extra.write_text("study: original\n")
+    weights = runner.cached_weights
+    def change_extra():
+        extra.write_text("study: changed before snapshot\n")
+        return weights()
+    monkeypatch.setattr(runner, "cached_weights", change_extra)
+    before = runner.git("rev-parse", "HEAD")
+    status_path = tmp_path / "runner_status.json"
+    assert runner.main(["--config", str(runner.EXPERIMENT_DIR / "configs/test.yaml"),
+                        "--provenance-config", str(extra), "--status-file", str(status_path)]) == 1
+    assert runner.git("rev-parse", "HEAD") == before and tracking.events == []
+    assert json.loads(status_path.read_text())["state"] == "failed"
+
+
+def test_extra_configuration_changed_after_upload_prevents_success(execution, monkeypatch, tracking, tmp_path):
+    extra = runner.EXPERIMENT_DIR / "configs/study.yaml"
+    extra.write_text("study: original\n")
+    upload = tracking.log_artifacts
+    def change_extra(path):
+        upload(path)
+        extra.write_text("study: changed during final upload\n")
+    monkeypatch.setattr("mlflow.log_artifacts", change_extra)
+    status_path = tmp_path / "runner_status.json"
+    assert runner.main(["--config", str(runner.EXPERIMENT_DIR / "configs/test.yaml"),
+                        "--provenance-config", str(extra), "--status-file", str(status_path)]) == 1
+    assert json.loads(status_path.read_text())["state"] == "failed"
+    assert "configs/study.yaml" in json.loads(tracking.uploads["failure.json"])["execution_input_error"]
+    assert tracking.events[-1] == "FAILED" and "FINISHED" not in tracking.events
+
+
+@pytest.mark.parametrize("variant,late_failure", [
+    ("dense", None), ("compressed", None),
+    ("compressed", "late upload"), ("dense", "finish"),
+])
+def test_actual_runner_cli_artifacts_reach_controller_collector(execution_repo, tmp_path, monkeypatch,
+                                                               variant, late_failure):
+    """Use actual producer files, real child exits, and the existing offline execution fixtures."""
+    pytest.importorskip("optuna")
+    import optuna_controller as controller
+
+    root, experiment = execution_repo
+    tests_directory = Path(__file__).parent
+    work = tmp_path / "handoff"
+    work.mkdir()
+    driver = work / "runner-driver.py"
+    driver.write_text(r'''import json,sys
+from copy import deepcopy
+from pathlib import Path
+from types import SimpleNamespace
+sys.path[:0] = [sys.argv[1], sys.argv[2], sys.argv[3]]
+import pytest,torch,yaml
+import test_run_experiment as fixtures
+import optuna_controller as controller
+runner = fixtures.runner
+root,experiment,work = Path(sys.argv[2]),Path(sys.argv[1]),Path(sys.argv[4])
+variant,late_failure = sys.argv[5],json.loads(sys.argv[6])
+assert Path(runner.__file__) == experiment / 'run_experiment.py'
+assert Path(fixtures.tltorch.__file__) == root / 'tltorch/__init__.py'
+with pytest.MonkeyPatch.context() as patch:
+    tracking = fixtures.tracking.__wrapped__(patch, work)
+    config_file = fixtures.config_file.__wrapped__(work)
+    images = fixtures.images.__wrapped__(work)
+    _,original,baseline,_ = fixtures.execution.__wrapped__(
+        config_file, images, work, patch, SimpleNamespace(param='cpu'), tracking, (root,experiment))
+    # Three artificial examples, one with label zero. A dominant, preserved bias
+    # makes that one correct in both variants, giving exactly 100/3 percent.
+    with torch.no_grad():
+        baseline[3].bias.zero_()
+        baseline[3].bias[0] = 100
+    manifest = json.loads(images[1].read_text())
+    manifest['examples'] = manifest['examples'][:3]
+    images[1].write_text(json.dumps(manifest))
+    requested = yaml.safe_load(original)
+    if variant == 'dense':
+        requested['compression'] = None
+    selected = experiment / 'configs/test.yaml'
+    selected.write_text(yaml.safe_dump(requested,sort_keys=False))
+    base = deepcopy(requested)
+    base['compression'] = None
+    template = experiment / 'configs/template.yaml'
+    template.write_text(yaml.safe_dump(base,sort_keys=False))
+    study = experiment / 'configs/study.yaml'
+    study.write_text('purpose: isolated runner-to-collector integration\n')
+    context = {'path': study, 'base_path': template, 'base': runner.load_config(template)[0],
+               'definition': {'purpose': 'synthetic handoff'}, 'state_dir': work / 'unused-state'}
+    contract = controller.compatibility(context)
+    runner.write_json(work / 'preflight.json', {'contract': contract,
+        'base': context['base'], 'study': str(study), 'template': str(template)})
+    tracking.fail = late_failure
+    code = runner.main(['--config',str(selected),'--status-file',str(work / 'runner_status.json'),
+                        '--provenance-config',str(study),'--provenance-config',str(template)])
+    runner.write_json(work / 'tracking-events.json',tracking.events)
+raise SystemExit(code)
+''')
+    command = [sys.executable, "-B", str(driver), str(experiment), str(root), str(tests_directory),
+               str(work), variant, json.dumps(late_failure)]
+    with (work / "runner.stdout").open("wb") as out, (work / "runner.stderr").open("wb") as err:
+        process = subprocess.Popen(command, cwd=root, stdout=out, stderr=err, start_new_session=True,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(root)})
+        identity = controller.process_identity(process.pid)
+        try:
+            code = process.wait(timeout=80)
+        finally:
+            if process.poll() is None:
+                import signal
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=3)
+    assert code == (0 if late_failure is None else 1), (work / "runner.stderr").read_text()
+    metadata = controller.read_json(work / "preflight.json")
+    context = {"base": metadata["base"], "path": Path(metadata["study"]),
+               "base_path": Path(metadata["template"])}
+    selected = experiment / "configs/test.yaml"
+    monkeypatch.setattr(runner, "REPOSITORY_ROOT", root)
+    monkeypatch.setattr(runner, "EXPERIMENT_DIR", experiment)
+    effective, _ = runner.load_config(selected)
+    record = {"directory": str(work), "trial_number": 0, "configuration_path": str(selected),
+              "configuration_sha256": runner.file_sha256(selected), "status_path": str(work / "runner_status.json"),
+              "exit_code": code, "process": identity,
+              "layers": effective["compression"]["layers"] if effective["compression"] else {}}
+    controller.atomic_json(work / "attempt.json", record)
+    receipt = controller.read_json(work / "runner_status.json")
+    output = Path(receipt["output_directory"])
+    measurements = controller.read_json(output / "measurements.json")
+    assert measurements["accuracy"]["top1_percent"] == 100 / 3
+    assert measurements["storage"]["parameter_count"] == (206 if variant == "dense" else 93)
+    events = controller.read_json(work / "tracking-events.json")
+    assert "reload model" in events and "all artifacts" in events
+    if late_failure is not None:
+        assert receipt["state"] == "failed" and (output / "failure.json").is_file()
+        with pytest.raises(RuntimeError, match="No confirmed successful child exit"):
+            controller.collect_result(context, metadata["contract"], record)
+        # A forged exit zero still cannot promote the actual failed receipt.
+        with pytest.raises(RuntimeError, match="partial.*receipt"):
+            controller.collect_result(context, metadata["contract"], {**record, "exit_code": 0})
+        return
+    assert receipt["state"] == "succeeded" and events[-1] == "FINISHED"
+    result = controller.collect_result(context, metadata["contract"], record)
+    assert result["values"] == [100 / 3, 206 if variant == "dense" else 93]
+    assert result["values"][0] != round(result["values"][0], 2)
+    # Independently count the actual trusted checkpoint's parameters, without any fit.
+    loaded = runner.load_model(output / "model.pt", "cpu")
+    assert sum(p.numel() for p in loaded.parameters()) == result["values"][1]
+    assert result["source_commit"] == runner.git("rev-parse", "HEAD").strip()
+    assert result["run_id"] == receipt["run_id"] == "run-1"
+    assert result["model_id"] == receipt["model_id"] == "model-1"
+    assert result["model_uri"] == receipt["model_uri"]
+    with zipfile.ZipFile(output / "source.zip") as archive:
+        for path in (context["path"], context["base_path"]):
+            name = path.relative_to(root).as_posix()
+            assert archive.read(name) == path.read_bytes()
+    for path in (context["path"], context["base_path"]):
+        assert f"upload {path.name}" in events[:events.index("load baseline")]
+    controller.atomic_json(work / "collected-result.json", result)

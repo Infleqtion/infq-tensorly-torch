@@ -53,7 +53,7 @@ versions and configured CUDA device before execution. Compare timings
 within the same hardware, device, batch size, thread count, and execution settings.
 
 Keep PyTorch's opt_einsum integration disabled and TensorLy's separate plugin
-inactive. Fine-tuning, quantization, compilation, opt_einsum, and Optuna are not
+inactive. Fine-tuning, quantization, compilation, and opt_einsum are not
 search dimensions in this study. Historical comparison notebooks remain
 separate evidence; in particular, the compilation notebook requires its recorded
 PyTorch `2.5.1+cpu` environment and has not been validated under the current
@@ -424,3 +424,26 @@ a compression algorithm or general optimization framework.
 
 The papers motivate layer-specific choices and data-dependent diagnostics. This
 plan does not propose implementing their decomposition or optimization algorithms.
+
+## Reviewed serial pilot controller (26 October 2026)
+
+The pending implementation adds `optuna_controller.py` and the explicit eight-case
+`configs/studies/resnet18_pilot.yaml`. The runner remains the only evaluator and
+tracking owner. Only exploration is eligible; confirmation and final evaluation
+remain reserved. The controller maximizes measured top-1 and minimizes actual
+whole-model parameter count. It never adds a dense comparison inside a child run.
+
+The fixed queue covers Dense and the reviewed individual-layer CP, Tucker, TT and
+BlockTT cases with bounded fitting controls. Queue exhaustion stops the pilot.
+There is no automatic joint search or Optuna pruning. The pilot is limited to
+eight asked attempts, 20 minutes per child, a persistent four-hour deadline, and
+two consecutive candidate failures. Reused successful requests consume attempts
+and remain distinct from newly executed measurements.
+
+Scientific compatibility is based on scoped content and input hashes, fixed
+settings, environment and machine/device identity, not snapshot-only commit IDs.
+Resume requires a matching trusted sampler checkpoint and database history;
+uncertain exits or tracking cleanup stop for reconciliation. Study state must be
+verified as persistent local disk before Cheetah deployment. The README describes
+commands, receipts, failure recovery and the external state layout. No real pilot
+or joint study is authorized or validated by the offline implementation tests.

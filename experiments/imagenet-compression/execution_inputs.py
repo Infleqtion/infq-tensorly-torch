@@ -14,24 +14,38 @@ def git(root, *args, input=None):
     )
 
 
-def execution_files(root, experiment, config_path):
-    """Select source, shared build inputs, and only the YAML chosen for this run."""
+def configuration_files(root, experiment, paths):
+    """Validate explicitly named YAMLs and return unique repository-relative paths."""
     root, experiment = Path(root), Path(experiment)
-    config_path = Path(config_path).expanduser().resolve()
     configs = experiment / "configs"
-    if not config_path.is_relative_to(configs) or config_path.suffix not in (".yaml", ".yml"):
-        raise ValueError("Execution YAML must be inside this experiment's configs/ directory; "
-                         "copy an external configuration there before execution")
-    if not config_path.is_file() or config_path.is_symlink():
-        raise ValueError("Execution YAML must be an existing regular file")
-    selected = config_path.relative_to(root).as_posix()
+    candidates = set(git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z").decode().split("\0"))
+    names = set()
+    for value in paths:
+        path = Path(value).expanduser()
+        if path.is_symlink():
+            raise ValueError(f"Execution YAML must be an existing regular file, not a symbolic link: {path}")
+        path = path.resolve()
+        if not path.is_relative_to(configs) or path.suffix not in (".yaml", ".yml"):
+            raise ValueError("Execution YAML must be inside this experiment's configs/ directory; "
+                             "copy an external configuration there before execution")
+        if not path.is_file():
+            raise ValueError(f"Execution YAML must be an existing regular file: {path}")
+        name = path.relative_to(root).as_posix()
+        if name not in candidates:
+            raise ValueError(f"The selected YAML is ignored by Git; move it to a trackable configs/ path: {name}")
+        names.add(name)
+    return sorted(names)
+
+
+def execution_files(root, experiment, config_path, provenance_configs=()):
+    """Select source, shared build inputs, and only explicitly named configurations."""
+    root, experiment = Path(root), Path(experiment)
+    configurations = configuration_files(root, experiment, [config_path, *provenance_configs])
     # A staged deletion is absent from the index; HEAD still supplies its old path.
     candidates = set(git(root, "ls-tree", "-r", "--name-only", "-z", "HEAD").decode().split("\0"))
     candidates.update(git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z").decode().split("\0"))
     experiment_name = experiment.relative_to(root).as_posix()
-    files = {"setup.py", "README.rst", "pyproject.toml", "uv.lock", ".python-version", selected}
-    if selected not in candidates:
-        raise ValueError("The selected YAML is ignored by Git; move it to a trackable configs/ path")
+    files = {"setup.py", "README.rst", "pyproject.toml", "uv.lock", ".python-version", *configurations}
     for name in candidates:
         path = Path(name)
         library_source = path.parts[:1] == ("tltorch",) and "tests" not in path.parts
@@ -50,12 +64,17 @@ def file_hashes(root, files):
             if (root / name).is_file() else None for name in files}
 
 
-def snapshot_execution_inputs(root, experiment, config_path, original_config, run_name):
+def snapshot_execution_inputs(root, experiment, config_path, original_config, run_name, *, provenance_configs=None):
     """Commit current scoped contents, preserving unrelated staged and unstaged work."""
     root = Path(root)
     if Path(config_path).expanduser().read_bytes() != original_config:
         raise RuntimeError("Selected YAML changed since configuration loading; reload it before execution")
-    files = execution_files(root, experiment, config_path)
+    provenance_configs = provenance_configs or {}
+    extra_paths = [root / name for name in provenance_configs]
+    files = execution_files(root, experiment, config_path, extra_paths)
+    for name, contents in provenance_configs.items():
+        if (root / name).read_bytes() != contents:
+            raise RuntimeError(f"Provenance YAML changed since configuration loading: {name}")
     hashes = file_hashes(root, files)
     before = git(root, "rev-parse", "HEAD").decode().strip()
     # Git's --only uses the named working-tree files and preserves staging elsewhere.
@@ -97,13 +116,16 @@ def snapshot_execution_inputs(root, experiment, config_path, original_config, ru
                            "no MLflow run was created") from error
     revision = {"commit": commit, "source_files_sha256": hashes,
                 "configuration_path": Path(config_path).resolve().relative_to(root).as_posix()}
+    if provenance_configs:
+        revision["provenance_configuration_paths"] = sorted(provenance_configs)
     verify_execution_inputs(root, experiment, config_path, revision)
     return revision
 
 
 def verify_execution_inputs(root, experiment, config_path, revision):
     """Fail if the selected source or configuration has changed since the snapshot."""
-    files = execution_files(root, experiment, config_path)
+    extra_paths = [Path(root) / name for name in revision.get("provenance_configuration_paths", [])]
+    files = execution_files(root, experiment, config_path, extra_paths)
     current = file_hashes(Path(root), files)
     expected = revision["source_files_sha256"]
     changed = sorted(name for name in current.keys() | expected.keys()

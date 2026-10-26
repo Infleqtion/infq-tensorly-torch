@@ -1,0 +1,60 @@
+# Reviewed eight-case pilot. Run --dry-run first; real execution needs separate approval.
+# Paths inside this file resolve from experiments/imagenet-compression/.
+schema_version: 1
+study_name: resnet18-exploration-pilot-v1
+mode: individual_pilot
+base_config: configs/resnet18_exploration_dense.yaml
+# Verify that this location is persistent LOCAL disk before any deployment/run.
+state_dir: ~/.local/state/tltorch-model-compression/optuna/resnet18-exploration-pilot-v1
+trial_config_dir: configs/optuna/resnet18-exploration-pilot-v1
+enabled_layers:
+  - layer4.0.conv2
+  - layer4.1.conv2
+  - fc
+methods:
+  convolution: [Dense, CP, Tucker, TT]
+  linear: [Dense, CP, Tucker, BlockTT]
+storage_targets: [0.50, 0.75, 0.90]
+convolution_tucker_fixed_rank_modes: spatial
+classifier_tensorization:
+  in_tensorized_features: [8, 8, 8]
+  out_tensorized_features: [10, 10, 10]
+fitting:
+  CP:
+    init: random
+    n_iter_max: 20
+    tol: 1.0e-8
+    random_state: 0
+    l2_reg: 1.0e-5
+  Tucker:
+    init: svd
+    n_iter_max: 25
+    tol: 1.0e-4
+    random_state: null
+objectives:
+  - {name: top1_percent, direction: maximize}
+  - {name: parameter_count, direction: minimize}
+sampler:
+  name: TPE
+  seed: 20261026
+  n_startup_trials: 5
+  n_ei_candidates: 24
+  multivariate: false
+  group: false
+  constant_liar: false
+limits:
+  total_attempts: 8
+  per_trial_seconds: 1200
+  study_deadline_hours: 4
+  consecutive_candidate_failures: 2
+  workers: 1
+  shutdown_seconds: 120
+pilot_cases:
+  - {layer: null, factorization: Dense}
+  - {layer: layer4.0.conv2, factorization: Tucker, storage_target: 0.75}
+  - {layer: layer4.0.conv2, factorization: TT, storage_target: 0.75}
+  - {layer: fc, factorization: BlockTT, storage_target: 0.75}
+  - {layer: fc, factorization: Tucker, storage_target: 0.75}
+  - {layer: layer4.1.conv2, factorization: TT, storage_target: 0.75}
+  - {layer: layer4.0.conv2, factorization: CP, storage_target: 0.50}
+  - {layer: fc, factorization: CP, storage_target: 0.50}

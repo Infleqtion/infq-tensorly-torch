@@ -7,7 +7,7 @@ import zipfile
 
 import pytest
 
-from execution_inputs import snapshot_execution_inputs, verify_execution_inputs
+from execution_inputs import configuration_files, snapshot_execution_inputs, verify_execution_inputs
 import run_experiment as runner
 
 
@@ -143,3 +143,99 @@ def test_snapshot_records_removed_head_paths_and_preserves_unrelated_work(execut
         assert original not in archive.namelist()
         if operation != "staged_deletion":
             assert archive.read(renamed) == (root / renamed).read_bytes()
+
+
+
+def test_explicit_configs_preserve_paths_archive_and_unrelated_staging(execution_repo, tmp_path, monkeypatch):
+    root, experiment = execution_repo
+    selected = experiment / "configs/test.yaml"
+    extras = []
+    for folder in ("study", "template"):
+        path = experiment / f"configs/{folder}/same.yaml"
+        path.parent.mkdir()
+        path.write_text(f"kind: {folder}\n")
+        extras.append(path)
+    unrelated = experiment / "configs/personal.yaml"
+    unrelated.write_text("personal: untouched\n")
+    (root / "unrelated.txt").write_text("staged\n")
+    git(root, "add", "--", "unrelated.txt")
+    (root / "unrelated.txt").write_text("unstaged\n")
+    staged = git(root, "diff", "--cached", "--", "unrelated.txt")
+    unstaged = git(root, "diff", "--", "unrelated.txt")
+    names = configuration_files(root, experiment, [*extras, extras[0]])
+    assert len(names) == 2
+    contents = {name: (root / name).read_bytes() for name in names}
+    revision = snapshot_execution_inputs(root, experiment, selected, selected.read_bytes(), "extras", provenance_configs=contents)
+    assert revision["provenance_configuration_paths"] == names
+    for name in names:
+        assert git(root, "show", f"{revision['commit']}:{name}") == contents[name]
+    assert unrelated.relative_to(root).as_posix() not in revision["source_files_sha256"]
+    assert git(root, "diff", "--cached", "--", "unrelated.txt") == staged
+    assert git(root, "diff", "--", "unrelated.txt") == unstaged
+    monkeypatch.setattr(runner, "REPOSITORY_ROOT", root)
+    runner.save_source(tmp_path, revision)
+    with zipfile.ZipFile(tmp_path / "source.zip") as archive:
+        for name in names:
+            assert archive.namelist().count(name) == 1 and archive.read(name) == contents[name]
+    verify_execution_inputs(root, experiment, selected, revision)
+    extras[0].write_text("kind: changed\n")
+    with pytest.raises(RuntimeError, match="changed after the recorded commit.*same.yaml"):
+        verify_execution_inputs(root, experiment, selected, revision)
+
+
+@pytest.mark.parametrize("problem", ["external", "ignored", "symlink", "directory", "suffix", "missing"])
+def test_extra_yaml_restrictions_are_checked_without_committing(execution_repo, tmp_path, problem):
+    root, experiment = execution_repo
+    path = experiment / "configs/extra.yaml"
+    path.write_text("extra: original\n")
+    if problem == "external":
+        path = tmp_path / "external.yaml"
+        path.write_text("external: file\n")
+    elif problem == "ignored":
+        with (root / ".gitignore").open("a") as stream:
+            stream.write("extra.yaml\n")
+    elif problem == "symlink":
+        link = experiment / "configs/link.yaml"
+        link.symlink_to(path)
+        path = link
+    elif problem == "directory":
+        path.unlink()
+        path.mkdir()
+    elif problem == "suffix":
+        path = path.rename(path.with_suffix(".txt"))
+    else:
+        path.unlink()
+    before = git(root, "rev-parse", "HEAD")
+    with pytest.raises(ValueError, match="configs/ directory|ignored|regular file"):
+        configuration_files(root, experiment, [path])
+    assert git(root, "rev-parse", "HEAD") == before
+
+
+def test_new_options_dry_run_preserves_import_and_git_isolation(execution_repo, tmp_path):
+    import os
+    import sys
+    root, experiment = execution_repo
+    selected = experiment / "configs/resnet18_exploration.yaml"
+    extra = experiment / "configs/study.yaml"
+    extra.write_text("study: example\n")
+    status = tmp_path / "runner_status.json"
+    before = (git(root, "rev-parse", "HEAD"), git(root, "ls-files", "--stage", "-z"),
+              git(root, "status", "--short", "--untracked-files=all"))
+    code = """
+import sys
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import run_experiment
+with patch('socket.socket.connect', side_effect=AssertionError('no network')):
+    assert run_experiment.main(['--config', sys.argv[2], '--status-file', sys.argv[3],
+                               '--provenance-config', sys.argv[4], '--dry-run']) == 0
+assert not any(name in sys.modules for name in ('torch', 'torchvision', 'mlflow', 'tltorch', 'optuna'))
+"""
+    env = {key: value for key, value in os.environ.items() if key not in ("TORCH_HOME", "MLFLOW_TRACKING_URI")}
+    result = subprocess.run([sys.executable, "-B", "-c", code, str(experiment), str(selected), str(status), str(extra)],
+                            env=env, capture_output=True, text=True, check=True)
+    assert "Configuration is valid" in result.stdout and not status.exists()
+    assert not (experiment / "results/runs").exists()
+    after = (git(root, "rev-parse", "HEAD"), git(root, "ls-files", "--stage", "-z"),
+             git(root, "status", "--short", "--untracked-files=all"))
+    assert before == after

@@ -184,6 +184,61 @@ uv run --no-sync python experiments/imagenet-compression/run_experiment.py --con
 These commands are independent. The runner never launches a dense reference,
 looks up another run, or calculates cross-run accuracy differences.
 
+Two optional CLI interfaces support a future external controller; neither adds
+Optuna or changes the configured model, measurements, or tracking fields:
+
+```bash
+uv run --no-sync python experiments/imagenet-compression/run_experiment.py \
+  --config experiments/imagenet-compression/configs/resnet18_exploration.yaml \
+  --status-file /absolute/existing-directory/runner_status.json \
+  --provenance-config experiments/imagenet-compression/configs/studies/example.yaml
+```
+
+The paths above illustrate the interface; supply an existing extra YAML and a
+new receipt path before executing. `--status-file` requires an absolute filename
+in an existing writable directory. Keep receipts outside source, for example in
+an external controller directory. An existing destination, including a dangling
+symlink, is rejected before snapshots or tracking. Complete JSON updates are
+atomic; updates detect replacement or editing observed before publication. The
+ownership check and replacement are not an atomic compare-and-swap. A supervisor
+must reserve a unique attempt directory and allow only the runner to write its
+receipt. This is a local receipt, not an additional MLflow artifact or tracking run.
+
+Receipt schema version 1 records `started`, `running`, `succeeded`, or `failed`,
+the current phase, selected configuration path and SHA-256, output directory,
+PID/parent PID/hostname/start time, tracking URI/workspace, and experiment/run/model
+IDs and model URI as available. Unknown identifiers are `null`. Failures record
+exception and cause types without copying error messages or environment contents.
+Argument and configuration validation precede receipt creation; validation errors
+can therefore return nonzero without a receipt. Existing `failure.json` diagnostics
+and tracebacks remain available when the runner creates them; a secondary receipt
+error does not replace the original error.
+
+Only after the runner returns through successful MLflow context exit does the CLI
+write `succeeded`. It references measurements, results, run metadata, configurations,
+source/input provenance, and verification files by path and SHA-256. A CSV or
+initialized Model is not evidence of completion. A supervising process should
+require both exit code zero and a matching succeeded receipt. If publishing that
+final receipt fails, the CLI returns nonzero and preserves the already finished
+run and its files. Abrupt termination may leave a started/running receipt; this
+interface does not supervise timeouts or install signal handlers.
+
+Repeat `--provenance-config` for a study definition and base template. These YAMLs
+must be regular non-symlink files under this experiment's `configs/`, including
+nested directories, and must not be Git-ignored. CLI filenames follow the caller's
+working directory. Only explicitly named files join the existing snapshot,
+committed-byte checks, source archive, and subsequent input verification. Repeated
+references are deduplicated; naming the selected configuration again adds nothing.
+Raw copies upload before model loading under `provenance_configs/` with their full
+repository-relative paths, so equal basenames remain distinct. The source record
+lists `provenance_configuration_paths` when extras are present. Unrelated YAMLs,
+staging and working changes retain their existing treatment.
+
+Both flags work with `--dry-run`: it validates destinations and extra YAML paths
+without creating a receipt or outputs, committing, importing execution dependencies,
+contacting tracking, or checking/downloading weights and images. Without either
+flag, manual execution and the original snapshot scope are unchanged.
+
 The required `tracking.uri` in YAML supplies the HTTP(S) server address; the
 example uses `http://127.0.0.1:9361` on Cheetah. No `MLFLOW_TRACKING_URI` export is
 needed, and an existing value cannot override the configuration. URI validation
@@ -625,3 +680,100 @@ for current commands. The original audit in `splits/imagenetv2_20261019/` is als
 preserved. Recorded paths in those files may refer to the old layout. They are
 provenance, not current path defaults. This refactor makes no new accuracy or
 performance claim.
+
+## Serial Optuna pilot
+
+The optional controller chooses configurations and supervises the existing runner.
+Each child still evaluates one model and owns its MLflow run and LoggedModel. The
+controller does not add tracking fields or a second evaluator. Install the locked
+optional group alongside the experiment dependencies when preparing an environment:
+
+```bash
+uv sync --locked --inexact --group experiments --group optuna
+uv run --no-sync python experiments/imagenet-compression/optuna_controller.py \
+  --study experiments/imagenet-compression/configs/studies/resnet18_pilot.yaml --dry-run
+```
+
+The dry-run validates the definition and dense template. It does not create study
+state, execution YAMLs, commits, tracking requests, or models, and does not check
+or download dataset images or weights. Ordinary manual runner use does not import
+or require Optuna. Real execution omits `--dry-run`; that is a separate, reviewed
+launch, not part of preparing or validating this implementation.
+
+The supplied pilot queues eight complete requests: Dense; Tucker and TT on
+`layer4.0.conv2` at 0.75; BlockTT and Tucker on `fc` at 0.75; TT on
+`layer4.1.conv2` at 0.75; then CP on `layer4.0.conv2` and `fc` at 0.50. Other
+layers remain dense. Queue exhaustion stops execution; it never starts a joint
+search. The enabled names and legal conditional choices are declared in the study
+YAML. Dense has no rank parameter. Compressed choices use floating storage targets,
+method-specific parameter names, Tucker-only spatial preservation, and the fixed
+classifier tensorization and fitting controls recorded there. Generated YAMLs
+preserve the template's scientific settings and order; all-Dense is explicit
+`compression: null`.
+
+The objectives are full-precision JSON `top1_percent` (maximize) and actual
+whole-model `parameter_count` (minimize). Latency stays in the normal results but
+is not an objective. The pilot uses Optuna 4.9.0's explicitly seeded TPE sampler;
+its fixed queue checks execution rather than demonstrating optimization. Shape-only
+rank matches produce local warnings, never automatic equivalence claims or reuse.
+
+Study state defaults to `~/.local/state/tltorch-model-compression/optuna/<study>/`.
+**Verify that this is persistent local disk before deployment.** If home is
+network-mounted, choose a persistent local-SSD path in a new study definition.
+The directory contains `study.sqlite3`, `study.json`, sampler checkpoint files,
+`summary.json`, and unique `attempts/` directories with controller-owned
+`attempt.json`, captured stdout/stderr, a configuration copy, and a runner-owned
+receipt. Keep it private: sampler pickle is trusted executable data, not an
+interchange format. Use only owned state from this environment. SQLite is serial;
+exclusive study and checkout locks prevent competing controllers, including two
+different studies sharing one checkout. Manual processes are not locked or stopped.
+
+Generated configurations use `configs/optuna/<study>/trial_<number>_<unique>.yaml`
+and are never overwritten. Each runner receives its study and base template as
+explicit provenance YAMLs. Its existing automatic snapshot captures those inputs
+and the controller source. The controller creates no pre-run commits. Unrelated
+staged and working files remain permitted. Compatibility uses scientific source
+and input hashes, package versions, paths, machine/device identity, fitting and
+runtime seeds, and fixed settings, rather than requiring unchanged HEAD. The first
+snapshot may capture those already-hashed pending sources; subsequent commits
+must change only this study's generated configurations.
+
+Resume uses the same command and state directory with `--resume`. Without that
+flag, an existing study is protected against accidental reuse; `--resume` also
+refuses to create a new study when its state is missing. It retains the original eight
+asked-attempt budget and four-hour deadline, including downtime, and never
+requeues the pilot. Each child has at most 1,200 seconds or the remaining deadline.
+Two consecutive recognized fitting failures stop the pilot; unknown, shared, or
+provenance failures stop immediately. Sampler state is saved after suggestions and
+after tell. Database and checkpoint writes are separate transactions: a mismatch
+stops for reconciliation rather than silently reseeding or claiming uninterrupted
+sampling. Missing child identity or durable exit evidence also requires review.
+
+Only a recorded exit zero plus a matching succeeded receipt, intact hashes,
+consistent provenance, both model verifications, source verification and completed
+run finalization can supply objectives. A measured top-1 of zero is valid. Exact
+requested duplicates reuse only intact successful evidence in the same compatible
+study, linking its original trial, commit, run, and model. Reuse consumes an attempt
+and is reported separately from newly executed measurements. Failed duplicates
+receive no invented objectives and are not automatically retried.
+
+During controller execution, SIGINT (Ctrl+C), SIGTERM, and SIGHUP request graceful
+shutdown. SIGHUP therefore stops an ordinary terminal-launched controller on
+terminal disconnection. Signals intentionally inherited as ignored remain ignored,
+including SIGHUP under `nohup`. The previous handlers are restored when controller
+execution ends; imports, help and dry-run do not install them. A handler only
+records the request. Ordinary supervisor code checks it while waiting for the
+runner, stops further launches, and retains interruption and child-exit evidence.
+Repeated signals do not interrupt bounded cleanup. SIGKILL, power failure and
+abrupt controller crashes cannot provide graceful cleanup; their existing
+conservative resume/reconciliation checks still apply.
+
+On interruption or timeout the controller signals only its owned process group,
+escalates if necessary, and reaps the child. Shutdown is bounded by 120 seconds,
+including a separately bounded tracking-cleanup subprocess. Cleanup can query only
+the saved run ID at its saved URI/workspace: RUNNING becomes KILLED, terminal runs
+remain untouched. Missing IDs, unconfirmed termination, or unavailable tracking
+leave `needs_cleanup` and stop further launches. Review that evidence explicitly;
+do not delete state or blindly restart RUNNING trials. No multi-objective pruning,
+automatic retries, joint-study transition, or confirmation/final evaluation is
+implemented here. The real pilot and Cheetah disk/GPU readiness remain untested.
