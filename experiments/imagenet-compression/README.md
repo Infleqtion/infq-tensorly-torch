@@ -270,8 +270,13 @@ Its model parameters always include `model` and `weights`. Compressed models als
 record `implementation`, `compression.layers`, and every supplied
 `compression.<layer>.<option>` field: rank, factorization, tensorization, fixed-rank
 modes, and parameter caps. Decomposition controls use
-`compression.<layer>.decomposition_kwargs.<control>`. Dense models receive no
-invented compression settings. Model settings are not duplicated as run parameters.
+`compression.<layer>.decomposition_kwargs.<control>`. The model-only parameter
+`compression.weight_fraction` records a common floating-point target when all
+selected layers use the same factorization and target. Mixed methods, differing
+targets, integer/list ranks, and `same` requests omit it. This describes selected
+weights, not achieved whole-model storage. Dense models record `1.0` as the
+unconverted baseline's plotting coordinate; they receive no per-layer conversion
+settings. Model settings are not duplicated as run parameters.
 Integer rank `1` stays `1`, floating-point target `1.0` stays `1.0`, and lists use
 deterministic JSON. Actual ranks, effective fitting settings, storage, and weight
 reconstruction errors remain in the compression report when conversion occurs.
@@ -793,3 +798,82 @@ leave `needs_cleanup` and stop further launches. Review that evidence explicitly
 do not delete state or blindly restart RUNNING trials. No multi-objective pruning,
 automatic retries, joint-study transition, or confirmation/final evaluation is
 implemented here. The real pilot and Cheetah disk/GPU readiness remain untested.
+
+
+## Uniform Tucker sweep
+
+`configs/studies/resnet18_uniform_tucker.yaml` defines the separate
+`uniform_tucker_sweep` mode. It queues exactly these five requests in order:
+
+| Case | Selected layers | Requested weight fraction |
+| --- | --- | ---: |
+| Dense pretrained baseline | None; `compression: null` | 1.0 plotting coordinate |
+| Uniform Tucker | All 21 Conv2d/Linear modules | 0.90 |
+| Uniform Tucker | All 21 Conv2d/Linear modules | 0.75 |
+| Uniform Tucker | All 21 Conv2d/Linear modules | 0.50 |
+| Uniform Tucker | All 21 Conv2d/Linear modules | 0.25 |
+
+The explicit YAML layer list follows torchvision's registered module order: the
+initial convolution, 16 residual-block convolutions, three shortcut projections,
+and classifier. An offline test checks this list against `resnet18(weights=None)`;
+that check does not evaluate or compress the full model. Every compressed case
+applies Tucker and one global floating-point fraction to that same list. It keeps
+full convolution spatial ranks, the classifier's input `(8,8,8)` / output
+`(10,10,10)` tensorization, and the existing Tucker fitting controls.
+
+The dense template supplies unchanged preprocessing, exploration images, seeds,
+float32 precision, device, batch size and timing settings. Each runner child loads
+its own untouched pretrained baseline; no candidate starts from an earlier
+compressed model, and no training or fine-tuning occurs. Requested fractions are
+approximate weight-storage targets. Integer rank rounding and fixed spatial modes
+can produce different retained fractions; actual parameter counts and compression
+reports remain authoritative. Rank selection is unchanged.
+
+Validate without creating study state or trial files:
+
+```bash
+uv run --no-sync python experiments/imagenet-compression/optuna_controller.py \
+  --study experiments/imagenet-compression/configs/studies/resnet18_uniform_tucker.yaml --dry-run
+```
+
+A real launch requires separate review and omits `--dry-run`; resume adds
+`--resume`. The distinct study name, state path and trial directory protect the
+historical individual pilot. Five total attempts include the dense baseline, with
+one worker, 1,200 seconds per trial, a four-hour persistent deadline, the existing
+two-consecutive-candidate-failure limit and 120-second shutdown allowance. The
+existing sampler is saved for the same resume protocol, but every choice is fixed
+by the queue: `method` and, for Tucker, one `weight_fraction`. There are no 21
+independent suggestions, adaptive follow-up trials, retries or extended budgets.
+The existing individual-pilot mode, receipts, supervision and failure rules apply.
+
+### Compare the five executions in MLflow
+
+Open workspace `quirc`, experiment `model-compression`. In Runs, select the names
+beginning `resnet18-uniform-tucker-exploration-v1-`; the suffixes identify `dense`
+or `tucker-0.90`, `tucker-0.75`, `tucker-0.50`, `tucker-0.25`. A Runs search can use
+`tags.mlflow.runName LIKE 'resnet18-uniform-tucker-exploration-v1-%'`. Include the
+dense execution and use completed, verified runs for comparisons. A failed
+candidate retains diagnostics but supplies no accuracy/size objectives.
+
+Use the native run-comparison scatter chart with X = `parameter_count` and
+Y = `top1_percent`. Both are existing unprefixed run metrics and also belong to
+each execution's LoggedModel. This is the primary accuracy-versus-actual-size plot.
+
+For the optional requested-fraction comparison, follow the selected runs' model
+links to their five LoggedModels (all named `model`); saved `run.json` files also
+record their exact model IDs. Include the dense model. Display the model parameter
+`compression.weight_fraction` and `top1_percent`. Where the installed native model
+comparison chart supports numeric model parameters on axes, choose X =
+`compression.weight_fraction` and Y = `top1_percent`. The dense coordinate `1.0`
+denotes no conversion, not a rank=1.0 request. Compressed coordinates are derived
+from the actual requests, not a separately maintained study value.
+
+The shared UI was not accessed during implementation. Exact chart controls and
+support for numeric LoggedModel-parameter axes depend on the deployed server/UI;
+the tested SDK is MLflow 3.17.2. If that axis is unavailable, retain the native
+model comparison table for requested fractions and the primary metric scatter
+plot. Do not duplicate the parameter onto runs, add metrics or install a plotting
+package to work around the UI. MLflow documents
+[run/model tracking](https://mlflow.org/docs/latest/ml/tracking/) and
+[LoggedModel search and comparison](https://mlflow.org/docs/latest/ml/search/search-models/);
+those pages do not verify this deployment's chart controls.

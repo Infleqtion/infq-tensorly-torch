@@ -91,7 +91,8 @@ def test_optional_compression_normalizes_dense_configuration(config_file, compre
     effective, original = runner.load_config(path)
     assert effective["compression"] is None and original == path.read_bytes()
     _, model_parameters = runner.requested_parameters(effective)
-    assert model_parameters == {"model": config["model"], "weights": config["weights"]}
+    assert model_parameters == {"model": config["model"], "weights": config["weights"],
+                                "compression.weight_fraction": "1.0"}
     assert "one dense pretrained ResNet-18 model" in runner.describe(effective)
 
 
@@ -456,7 +457,7 @@ def execution(config_file, images, tmp_path, monkeypatch, request, tracking, exe
 
 @pytest.mark.parametrize("execution", ["cpu", pytest.param("cuda:0", marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA is unavailable"))], indirect=True)
-@pytest.mark.parametrize("compression", ["absent", None, "Tucker", "TT"])
+@pytest.mark.parametrize("compression", ["absent", None, "Tucker", "TT", "uniform-Tucker"])
 def test_complete_execution_tracks_and_measures_one_model(execution, capsys, monkeypatch, tracking, compression):
     config, original, baseline, events = execution
     selected_yaml = runner.EXPERIMENT_DIR / "configs/test.yaml"
@@ -467,6 +468,12 @@ def test_complete_execution_tracks_and_measures_one_model(execution, capsys, mon
         requested["compression"] = None
     elif compression == "TT":
         requested["compression"]["layers"]["0"] = {"factorization": "TT", "rank": 2}
+    elif compression == "uniform-Tucker":
+        requested["compression"]["layers"] = {
+            "0": {"factorization": "Tucker", "rank": 0.5, "fixed_rank_modes": "spatial"},
+            "3": {"factorization": "Tucker", "rank": 0.5,
+                  "in_tensorized_features": [4, 8], "out_tensorized_features": [2, 3]},
+        }
     selected_yaml.write_text(yaml.safe_dump(requested))
     config, original = runner.load_config(selected_yaml)
     compressed = config["compression"] is not None
@@ -560,7 +567,11 @@ def test_complete_execution_tracks_and_measures_one_model(execution, capsys, mon
     else:
         assert "compression_report.json" not in client.uploads
         assert measurements["storage"] == original_storage
-        assert client.model_params == {"model": config["model"], "weights": config["weights"]}
+        assert client.model_params == {"model": config["model"], "weights": config["weights"],
+                                       "compression.weight_fraction": "1.0"}
+    if compression == "uniform-Tucker":
+        assert client.model_params["compression.weight_fraction"] == "0.5"
+        assert "compression.weight_fraction" not in client.params
     row, = csv.DictReader(client.uploads["results.csv"].decode().splitlines())
     assert measurements["variant"] == row["variant"] == ("compressed" if compressed else "dense")
     expected_metrics = {}
@@ -1145,7 +1156,8 @@ with patch("socket.socket.connect", side_effect=AssertionError("Temporary local 
             assert record.params["compression.fc.rank"] == "1"
             assert record.params["compression.layer4.0.conv2.rank"] == "1.0"
         else:
-            assert record.params == {"model": config["model"], "weights": config["weights"]}
+            assert record.params == {"model": config["model"], "weights": config["weights"],
+                                     "compression.weight_fraction": "1.0"}
         assert client.get_run(run.info.run_id).data.params == run_parameters
         assert not run_parameters.keys() & record.params.keys()
 
@@ -1568,3 +1580,35 @@ def test_computation_oom_receipt_records_exact_phase_and_input_failure(execution
     assert bool(failure["execution_input_error"]) == changed_source
     assert events[-1] == "FAILED" and "FINISHED" not in events
     assert "measurements.json" not in receipt.get("artifacts", {})
+
+
+
+@pytest.mark.parametrize("ranks,methods,expected", [
+    (None, None, "1.0"), ([0.75, 0.75], ["Tucker", "Tucker"], "0.75"),
+    ([1.0, 1.0], ["Tucker", "Tucker"], "1.0"),
+    ([0.75, 0.50], ["Tucker", "Tucker"], None),
+    ([0.75, 0.75], ["Tucker", "TT"], None),
+    ([1, 1], ["Tucker", "Tucker"], None),
+    ([1.0, 1], ["Tucker", "Tucker"], None),
+    ([[2, 2], [2, 2]], ["Tucker", "Tucker"], None),
+    (["same", "same"], ["Tucker", "Tucker"], None),
+    ([2.0, 2.0], ["Tucker", "Tucker"], None),
+])
+def test_requested_weight_fraction_is_derived_and_model_only(config_file, ranks, methods, expected):
+    path, config = config_file
+    if ranks is None:
+        config["compression"] = None
+    else:
+        config["compression"]["layers"] = {name: {"factorization": method, "rank": rank}
+            for name, method, rank in zip(("conv1", "fc"), methods, ranks)}
+    path.write_text(yaml.safe_dump(config))
+    effective, _ = runner.load_config(path)
+    run_params, model_params = runner.requested_parameters(effective)
+    assert "compression.weight_fraction" not in run_params
+    assert model_params.get("compression.weight_fraction") == expected
+    if expected is None:
+        assert "compression.weight_fraction" not in model_params
+    if ranks is not None:
+        for name, method, rank in zip(("conv1", "fc"), methods, ranks):
+            assert model_params[f"compression.{name}.factorization"] == method
+            assert model_params[f"compression.{name}.rank"] == (rank if isinstance(rank, str) else json.dumps(rank))

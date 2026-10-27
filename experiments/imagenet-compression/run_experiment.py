@@ -883,6 +883,16 @@ def requested_parameters(config):
         "timing.warmup": timing["warmup"], "timing.repeats": timing["repeats"],
     }
     model_parameters = {"model": config["model"], "weights": config["weights"]}
+    if compression is None:
+        # Plotting coordinate for an unconverted baseline, never a decomposition request.
+        model_parameters["compression.weight_fraction"] = 1.0
+    else:
+        settings = list(compression["layers"].values())
+        fraction = settings[0]["rank"]
+        if (type(fraction) is float and math.isfinite(fraction) and 0 < fraction <= 1
+                and all(type(s["rank"]) is float and s["rank"] == fraction
+                        and s["factorization"] == settings[0]["factorization"] for s in settings)):
+            model_parameters["compression.weight_fraction"] = fraction
     if compression is not None:
         layers = compression["layers"]
         model_parameters["implementation"] = compression["implementation"]

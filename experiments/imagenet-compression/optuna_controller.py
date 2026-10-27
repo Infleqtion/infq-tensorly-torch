@@ -31,6 +31,17 @@ import execution_inputs as inputs
 import run_experiment as runner
 
 
+# torchvision's registered module order; the offline coverage test checks all 21 names.
+RESNET18_TUCKER_LAYERS = (
+    "conv1",
+    "layer1.0.conv1", "layer1.0.conv2", "layer1.1.conv1", "layer1.1.conv2",
+    "layer2.0.conv1", "layer2.0.conv2", "layer2.0.downsample.0", "layer2.1.conv1", "layer2.1.conv2",
+    "layer3.0.conv1", "layer3.0.conv2", "layer3.0.downsample.0", "layer3.1.conv1", "layer3.1.conv2",
+    "layer4.0.conv1", "layer4.0.conv2", "layer4.0.downsample.0", "layer4.1.conv1", "layer4.1.conv2",
+    "fc",
+)
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -79,25 +90,37 @@ def load_study(path):
     definition = yaml.load(path.read_bytes(), Loader=runner.UniqueSafeLoader)
     required = ("schema_version", "study_name", "mode", "base_config", "state_dir", "trial_config_dir",
                 "enabled_layers", "methods", "storage_targets", "convolution_tucker_fixed_rank_modes",
-                "classifier_tensorization", "fitting", "objectives", "sampler", "limits", "pilot_cases")
-    runner._keys(definition, required, (), "study")
-    if type(definition["schema_version"]) is not int or definition["schema_version"] != 1 or definition["mode"] != "individual_pilot":
-        raise ValueError("Only schema_version 1 individual_pilot is implemented")
+                "classifier_tensorization", "fitting", "objectives", "sampler", "limits")
+    runner._keys(definition, required, ("pilot_cases", "sweep_cases"), "study")
+    if (type(definition["schema_version"]) is not int or definition["schema_version"] != 1
+            or definition["mode"] not in ("individual_pilot", "uniform_tucker_sweep")):
+        raise ValueError("Only schema_version 1 individual_pilot or uniform_tucker_sweep is implemented")
+    uniform = definition["mode"] == "uniform_tucker_sweep"
+    case_key = "sweep_cases" if uniform else "pilot_cases"
+    runner._keys(definition, (*required, case_key), (), "study")
     if not isinstance(definition["study_name"], str) or not definition["study_name"].strip():
         raise ValueError("study_name must be nonempty")
     layers = definition["enabled_layers"]
     if not isinstance(layers, list) or not layers or any(not isinstance(n, str) or not n for n in layers) or len(set(layers)) != len(layers):
         raise ValueError("enabled_layers must contain distinct nonempty names in conversion order")
-    for name in layers:
-        if name != "fc" and not (re.fullmatch(r"layer[1-4]\.[01]\.conv[12]", name)):
-            raise ValueError(f"Declare a supported ResNet18 convolution name or fc: {name}")
+    if uniform:
+        if layers != list(RESNET18_TUCKER_LAYERS):
+            raise ValueError("Uniform Tucker sweep must select all 21 ResNet18 layers in the declared module order")
+    else:
+        for name in layers:
+            if name != "fc" and not (re.fullmatch(r"layer[1-4]\.[01]\.conv[12]", name)):
+                raise ValueError(f"Declare a supported ResNet18 convolution name or fc: {name}")
     expected_methods = {"convolution": ["Dense", "CP", "Tucker", "TT"],
                         "linear": ["Dense", "CP", "Tucker", "BlockTT"]}
+    if uniform:
+        expected_methods = {"convolution": ["Dense", "Tucker"], "linear": ["Dense", "Tucker"]}
     if definition["methods"] != expected_methods:
         raise ValueError("methods must declare the reviewed legal ordered choices for convolution and linear")
     targets = definition["storage_targets"]
     if not isinstance(targets, list) or not targets or any(type(v) is not float or not 0 < v <= 1 for v in targets) or len(set(targets)) != len(targets):
         raise ValueError("storage_targets must be distinct floating-point fractions in (0, 1]")
+    if uniform and canonical(targets) != canonical([0.90, 0.75, 0.50, 0.25]):
+        raise ValueError("Uniform Tucker sweep targets must be [0.90, 0.75, 0.50, 0.25] in that order")
     if definition["convolution_tucker_fixed_rank_modes"] != "spatial":
         raise ValueError("Convolution Tucker fixed_rank_modes must be spatial")
     tensorization = definition["classifier_tensorization"]
@@ -106,6 +129,8 @@ def load_study(path):
     expected_fitting = {"CP": {"init": "random", "n_iter_max": 20, "tol": 1e-8,
                                "random_state": 0, "l2_reg": 1e-5},
                         "Tucker": {"init": "svd", "n_iter_max": 25, "tol": 1e-4, "random_state": None}}
+    if uniform:
+        expected_fitting = {"Tucker": expected_fitting["Tucker"]}
     if canonical(definition["fitting"]) != canonical(expected_fitting):
         raise ValueError("fitting must match the reviewed CP/Tucker controls")
     if definition["objectives"] != [{"name": "top1_percent", "direction": "maximize"},
@@ -122,17 +147,27 @@ def load_study(path):
         runner._integer(limits[name], 1, f"limits.{name}")
     if limits["workers"] != 1 or limits["shutdown_seconds"] > 120:
         raise ValueError("Only one worker and at most 120 shutdown seconds are supported")
-    cases = definition["pilot_cases"]
-    if not isinstance(cases, list) or not cases:
-        raise ValueError("pilot_cases must be a nonempty list")
-    for case in cases:
-        runner._keys(case, ("layer", "factorization"), ("storage_target",), "pilot case")
-        name, method = case["layer"], case["factorization"]
-        if method == "Dense":
-            if name is not None or "storage_target" in case:
-                raise ValueError("Dense pilot case has layer null and no storage target")
-        elif name not in layers or method not in expected_methods[layer_type(name)] or type(case.get("storage_target")) is not float or case["storage_target"] not in targets:
-            raise ValueError("Pilot case must name an enabled layer, legal method, and floating target")
+    cases = definition[case_key]
+    if uniform:
+        expected_limits = {"total_attempts": 5, "per_trial_seconds": 1200, "study_deadline_hours": 4,
+                           "consecutive_candidate_failures": 2, "workers": 1, "shutdown_seconds": 120}
+        if limits != expected_limits:
+            raise ValueError("Uniform Tucker sweep requires the reviewed five-attempt limits")
+        expected_cases = [{"factorization": "Dense"}, *(
+            {"factorization": "Tucker", "storage_target": target} for target in targets)]
+        if canonical(cases) != canonical(expected_cases):
+            raise ValueError("Uniform Tucker sweep cases must be Dense, then Tucker at 0.90, 0.75, 0.50, 0.25")
+    else:
+        if not isinstance(cases, list) or not cases:
+            raise ValueError("pilot_cases must be a nonempty list")
+        for case in cases:
+            runner._keys(case, ("layer", "factorization"), ("storage_target",), "pilot case")
+            name, method = case["layer"], case["factorization"]
+            if method == "Dense":
+                if name is not None or "storage_target" in case:
+                    raise ValueError("Dense pilot case has layer null and no storage target")
+            elif name not in layers or method not in expected_methods[layer_type(name)] or type(case.get("storage_target")) is not float or case["storage_target"] not in targets:
+                raise ValueError("Pilot case must name an enabled layer, legal method, and floating target")
     base_path = runner.experiment_path(definition["base_config"])
     inputs.configuration_files(root, experiment, [base_path])
     base, _ = runner.load_config(base_path)
@@ -159,6 +194,11 @@ def load_study(path):
 
 def pilot_parameters(definition, case):
     """Fully specify each queued case; no unspecified method is sampled at random."""
+    if definition["mode"] == "uniform_tucker_sweep":
+        params = {"method": case["factorization"]}
+        if case["factorization"] != "Dense":
+            params["weight_fraction"] = case["storage_target"]
+        return params
     params = {f"{name}.method": case["factorization"] if name == case["layer"] else "Dense"
               for name in definition["enabled_layers"]}
     if case["factorization"] != "Dense":
@@ -167,13 +207,20 @@ def pilot_parameters(definition, case):
 
 
 def suggest_layers(trial, definition):
-    """Conditional choices also work for a later separately reviewed joint search."""
+    """Expand a fixed global sweep request or the existing conditional pilot choices."""
     layers = {}
-    for name in definition["enabled_layers"]:
-        method = trial.suggest_categorical(f"{name}.method", definition["methods"][layer_type(name)])
+    uniform = definition["mode"] == "uniform_tucker_sweep"
+    if uniform:
+        method = trial.suggest_categorical("method", ["Dense", "Tucker"])
         if method == "Dense":
-            continue
-        target = trial.suggest_categorical(f"{name}.{method}.storage_target", definition["storage_targets"])
+            return layers
+        target = trial.suggest_categorical("weight_fraction", definition["storage_targets"])
+    for name in definition["enabled_layers"]:
+        if not uniform:
+            method = trial.suggest_categorical(f"{name}.method", definition["methods"][layer_type(name)])
+            if method == "Dense":
+                continue
+            target = trial.suggest_categorical(f"{name}.{method}.storage_target", definition["storage_targets"])
         options = {"factorization": method, "rank": target}
         if name == "fc":
             options.update(deepcopy(definition["classifier_tensorization"]))
@@ -340,7 +387,8 @@ def open_study(context, contract):
                                     directions=[o["direction"] for o in definition["objectives"]])
         study.set_metric_names([o["name"] for o in definition["objectives"]])
         study.set_user_attr("compatibility_sha256", digest(canonical(contract)))
-        for case in definition["pilot_cases"]:
+        cases = definition["sweep_cases"] if definition["mode"] == "uniform_tucker_sweep" else definition["pilot_cases"]
+        for case in cases:
             study.enqueue_trial(pilot_parameters(definition, case))
         now = time.time()
         metadata = {"schema_version": 1, "created_at": now,
@@ -367,7 +415,10 @@ def reserve_attempt(context, trial, layers):
     config_dir = context["trial_dir"]
     config_dir.mkdir(parents=True, exist_ok=True)
     path = config_dir / f"trial_{trial.number:04d}_{directory.name.rsplit('_', 1)[1]}.yaml"
-    contents = render_config(context, layers, f"{context['definition']['study_name']}-{trial.number:04d}")
+    run_name = f"{context['definition']['study_name']}-{trial.number:04d}"
+    if context["definition"]["mode"] == "uniform_tucker_sweep":
+        run_name += f"-tucker-{next(iter(layers.values()))['rank']:.2f}" if layers else "-dense"
+    contents = render_config(context, layers, run_name)
     with path.open("xb") as stream:
         stream.write(contents)
     # Apply precisely the same path/config validation as a manual runner invocation.

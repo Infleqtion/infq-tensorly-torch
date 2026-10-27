@@ -279,7 +279,9 @@ def test_changed_source_input_and_lineage_stop_resume(study_context):
         controller.check_lineage(context, metadata)
 
 
-def test_deadline_includes_downtime_and_waiting_cases_do_not_count_as_asked(study_context, monkeypatch):
+@pytest.mark.parametrize("context_fixture", ["study_context", "uniform_context"])
+def test_deadline_includes_downtime_and_waiting_cases_do_not_count_as_asked(request, context_fixture, monkeypatch):
+    study_context = request.getfixturevalue(context_fixture)
     context = study_context
     context["state_dir"].mkdir(mode=0o700)
     contract = contract_for(context)
@@ -289,7 +291,8 @@ def test_deadline_includes_downtime_and_waiting_cases_do_not_count_as_asked(stud
     monkeypatch.setattr(controller, "compatibility", contract_for)
     monkeypatch.setattr(controller, "supervise", lambda *args: pytest.fail("Expired study launched a child"))
     result = controller.run_controller(context)
-    assert result["asked"] == 0 and len(study.trials) == 8
+    expected_count = 5 if context["definition"]["mode"] == "uniform_tucker_sweep" else 8
+    assert result["asked"] == 0 and len(study.trials) == expected_count
     assert result["deadline"] == metadata["deadline"]
 
 
@@ -424,7 +427,9 @@ def test_unknown_failure_stops_and_preserves_original_and_cleanup_details(study_
     assert "offline transport failure" in saved["cleanup_error"]
 
 
-def test_controller_and_manual_dry_runs_do_not_import_optuna_or_execute(study_context, monkeypatch, tmp_path):
+@pytest.mark.parametrize("context_fixture", ["study_context", "uniform_context"])
+def test_controller_and_manual_dry_runs_do_not_import_optuna_or_execute(request, context_fixture, monkeypatch, tmp_path):
+    study_context = request.getfixturevalue(context_fixture)
     context = study_context
     for name in ("run_controller", "compatibility", "exclusive_locks"):
         monkeypatch.setattr(controller, name, lambda *args: pytest.fail("Dry-run executed"))
@@ -903,3 +908,145 @@ def test_computation_oom_requires_consistent_evidence_before_continuing(study_co
     assert metadata["stopped_reason"] and record["failure_category"] == "infrastructure"
     assert len(list((context["state_dir"] / "attempts").glob("*/attempt.json"))) == 1
     assert (output / "failure.json").exists()
+
+
+
+@pytest.fixture
+def uniform_context(study_context):
+    definition = yaml.safe_load((Path(__file__).parents[1] / "configs/studies/resnet18_uniform_tucker.yaml").read_text())
+    definition["base_config"] = "configs/base.yaml"
+    definition["state_dir"] = str(study_context["state_dir"].with_name("uniform-state"))
+    path = runner.EXPERIMENT_DIR / "configs/uniform.yaml"
+    path.write_text(yaml.safe_dump(definition, sort_keys=False))
+    return controller.load_study(path)
+
+
+def test_uniform_tucker_covers_resnet18_with_five_fixed_global_requests(uniform_context):
+    import torch
+    from torchvision.models import resnet18
+
+    definition = uniform_context["definition"]
+    with torch.random.fork_rng(devices=[]):
+        model = resnet18(weights=None)
+    names = [name for name, layer in model.named_modules() if isinstance(layer, (torch.nn.Conv2d, torch.nn.Linear))]
+    assert len(names) == 21 and definition["enabled_layers"] == names == list(controller.RESNET18_TUCKER_LAYERS)
+    assert len(definition["sweep_cases"]) == 5
+    assert definition["storage_targets"] == [0.90, 0.75, 0.50, 0.25]
+    class FixedTrial:
+        def __init__(self, params):
+            self.params, self.seen = params, []
+        def suggest_categorical(self, name, choices):
+            self.seen.append(name)
+            assert self.params[name] in choices
+            return self.params[name]
+    for case in definition["sweep_cases"]:
+        params = controller.pilot_parameters(definition, case)
+        trial = FixedTrial(params)
+        layers = controller.suggest_layers(trial, definition)
+        rendered = yaml.safe_load(controller.render_config(uniform_context, layers, "uniform-test"))
+        for name in ("data", "model", "weights", "cache", "runtime", "timing", "output_root"):
+            assert rendered[name] == uniform_context["base_raw"][name]
+        assert rendered["tracking"] == {**uniform_context["base_raw"]["tracking"], "run_name": "uniform-test"}
+        if case["factorization"] == "Dense":
+            assert not layers and rendered["compression"] is None
+            assert params == {"method": "Dense"} and trial.seen == ["method"]
+            continue
+        fraction = case["storage_target"]
+        assert params == {"method": "Tucker", "weight_fraction": fraction}
+        assert trial.seen == ["method", "weight_fraction"]  # no independent per-layer choices
+        assert list(layers) == names == list(rendered["compression"]["layers"])
+        assert rendered["compression"]["implementation"] == "factorized"
+        for name, options in layers.items():
+            assert options["factorization"] == "Tucker" and type(options["rank"]) is float and options["rank"] == fraction
+            assert options["decomposition_kwargs"] == definition["fitting"]["Tucker"]
+            if name == "fc":
+                assert options["in_tensorized_features"] == [8, 8, 8]
+                assert options["out_tensorized_features"] == [10, 10, 10]
+                assert "fixed_rank_modes" not in options
+            else:
+                assert options["fixed_rank_modes"] == "spatial"
+                assert "in_tensorized_features" not in options
+
+
+def test_uniform_tucker_resumes_remaining_queue_without_extending_budget(uniform_context, monkeypatch):
+    context, calls = uniform_context, []
+    monkeypatch.setattr(controller, "compatibility", contract_for)
+    def execute(context, record, seconds, *, termination=None):
+        calls.append(record["trial_number"])
+        assert 0 < seconds <= 1200
+        result = fake_success(context, record, seconds)
+        name = yaml.safe_load(Path(record["configuration_path"]).read_text())["tracking"]["run_name"]
+        suffix = "-dense" if not record["layers"] else f"-tucker-{next(iter(record['layers'].values()))['rank']:.2f}"
+        assert name.startswith(context["definition"]["study_name"]) and name.endswith(suffix)
+        if len(calls) == 2:
+            termination["signal"] = "SIGTERM"
+        return result
+    monkeypatch.setattr(controller, "supervise", execute)
+    unrelated = runner.REPOSITORY_ROOT / "unrelated.txt"
+    unrelated.write_text("unrelated staged\n")
+    inputs.git(runner.REPOSITORY_ROOT, "add", "unrelated.txt")
+    unrelated.write_text("unrelated working\n")
+    with pytest.raises(KeyboardInterrupt, match="SIGTERM"):
+        controller.run_controller(context)
+    before = controller.read_json(context["state_dir"] / "study.json")
+    assert calls == [0, 1]
+    result = controller.run_controller(context)
+    assert result["asked"] == 5 and result["newly_executed"] == list(range(5)) and not result["reused"]
+    assert calls == list(range(5))
+    study, after = controller.open_study(context, contract_for(context))
+    assert after["deadline"] == before["deadline"] and len(study.trials) == 5
+    assert study.trials[0].params == {"method": "Dense"}
+    assert [trial.params for trial in study.trials[1:]] == [
+        {"method": "Tucker", "weight_fraction": fraction} for fraction in (0.90, 0.75, 0.50, 0.25)]
+    assert controller.run_controller(context) == result and calls == list(range(5))
+    assert inputs.git(runner.REPOSITORY_ROOT, "show", ":unrelated.txt") == b"unrelated staged\n"
+    assert unrelated.read_text() == "unrelated working\n"
+
+
+def test_uniform_tucker_candidate_failures_keep_original_stopping_limit(uniform_context, monkeypatch):
+    context, calls = uniform_context, []
+    monkeypatch.setattr(controller, "compatibility", contract_for)
+    monkeypatch.setattr(controller, "cleanup_tracking", terminal_cleanup)
+    def execute(context, record, seconds, *, termination=None):
+        calls.append(record["trial_number"])
+        if record["layers"]:
+            return failed_computation(context, record)
+        return fake_success(context, record, seconds)
+    monkeypatch.setattr(controller, "supervise", execute)
+    result = controller.run_controller(context)
+    assert calls == [0, 1, 2] and result["asked"] == 3 and result["failed"] == [1, 2]
+    study, metadata = controller.open_study(context, contract_for(context))
+    assert metadata["consecutive_candidate_failures"] == 2
+    assert all(t.values is None for t in study.trials[1:3])
+    assert all(t.state == optuna.trial.TrialState.WAITING for t in study.trials[3:])
+    assert controller.run_controller(context)["asked"] == 3 and calls == [0, 1, 2]
+
+
+@pytest.mark.parametrize("problem,message", [
+    ("omitted_layer", "all 21"), ("conversion_order", "declared module order"),
+    ("different_fraction", "targets"), ("case_order", "sweep cases"),
+    ("dense_rank", "sweep cases"), ("extra_case", "sweep cases"),
+    ("attempt_budget", "five-attempt"), ("mixed_method", "methods"),
+])
+def test_uniform_tucker_rejects_changed_sweep_contract_without_state(uniform_context, problem, message):
+    definition = deepcopy(uniform_context["definition"])
+    if problem == "omitted_layer":
+        definition["enabled_layers"].pop()
+    elif problem == "conversion_order":
+        definition["enabled_layers"] = list(reversed(definition["enabled_layers"]))
+    elif problem == "different_fraction":
+        definition["storage_targets"][-1] = 0.30
+    elif problem == "case_order":
+        definition["sweep_cases"].reverse()
+    elif problem == "dense_rank":
+        definition["sweep_cases"][0]["storage_target"] = 1.0
+    elif problem == "extra_case":
+        definition["sweep_cases"].append({"factorization": "Tucker", "storage_target": 0.25})
+    elif problem == "attempt_budget":
+        definition["limits"]["total_attempts"] = 6
+    else:
+        definition["methods"]["linear"].append("BlockTT")
+    uniform_context["path"].write_text(yaml.safe_dump(definition))
+    with pytest.raises(ValueError, match=message):
+        controller.load_study(uniform_context["path"])
+    assert not uniform_context["state_dir"].exists() and not uniform_context["trial_dir"].exists()

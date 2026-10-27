@@ -1,0 +1,71 @@
+# Five fixed cases; no adaptive suggestions or per-layer choices.
+# Paths resolve from experiments/imagenet-compression/.
+schema_version: 1
+study_name: resnet18-uniform-tucker-exploration-v1
+mode: uniform_tucker_sweep
+base_config: configs/resnet18_exploration_dense.yaml
+# Verify persistent LOCAL disk before any separately approved deployment or run.
+state_dir: ~/.local/state/tltorch-model-compression/optuna/resnet18-uniform-tucker-exploration-v1
+trial_config_dir: configs/optuna/resnet18-uniform-tucker-exploration-v1
+enabled_layers:
+  - conv1
+  - layer1.0.conv1
+  - layer1.0.conv2
+  - layer1.1.conv1
+  - layer1.1.conv2
+  - layer2.0.conv1
+  - layer2.0.conv2
+  - layer2.0.downsample.0
+  - layer2.1.conv1
+  - layer2.1.conv2
+  - layer3.0.conv1
+  - layer3.0.conv2
+  - layer3.0.downsample.0
+  - layer3.1.conv1
+  - layer3.1.conv2
+  - layer4.0.conv1
+  - layer4.0.conv2
+  - layer4.0.downsample.0
+  - layer4.1.conv1
+  - layer4.1.conv2
+  - fc
+methods:
+  convolution: [Dense, Tucker]
+  linear: [Dense, Tucker]
+storage_targets: [0.90, 0.75, 0.50, 0.25]
+convolution_tucker_fixed_rank_modes: spatial
+classifier_tensorization:
+  in_tensorized_features: [8, 8, 8]
+  out_tensorized_features: [10, 10, 10]
+fitting:
+  Tucker:
+    init: svd
+    n_iter_max: 25
+    tol: 1.0e-4
+    random_state: null
+objectives:
+  - {name: top1_percent, direction: maximize}
+  - {name: parameter_count, direction: minimize}
+# All suggestions are fixed by the queue. The existing seeded sampler is persisted
+# for the same resume protocol; it does not choose additional experiments.
+sampler:
+  name: TPE
+  seed: 20261026
+  n_startup_trials: 5
+  n_ei_candidates: 24
+  multivariate: false
+  group: false
+  constant_liar: false
+limits:
+  total_attempts: 5
+  per_trial_seconds: 1200
+  study_deadline_hours: 4
+  consecutive_candidate_failures: 2
+  workers: 1
+  shutdown_seconds: 120
+sweep_cases:
+  - {factorization: Dense}
+  - {factorization: Tucker, storage_target: 0.90}
+  - {factorization: Tucker, storage_target: 0.75}
+  - {factorization: Tucker, storage_target: 0.50}
+  - {factorization: Tucker, storage_target: 0.25}
