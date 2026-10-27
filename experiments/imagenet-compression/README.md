@@ -743,8 +743,24 @@ flag, an existing study is protected against accidental reuse; `--resume` also
 refuses to create a new study when its state is missing. It retains the original eight
 asked-attempt budget and four-hour deadline, including downtime, and never
 requeues the pilot. Each child has at most 1,200 seconds or the remaining deadline.
-Two consecutive recognized fitting failures stop the pilot; unknown, shared, or
-provenance failures stop immediately. Sampler state is saved after suggestions and
+Two consecutive recognized candidate failures stop the pilot; unknown, shared,
+or provenance failures stop immediately. The conversion-failure policy is unchanged.
+In addition, a direct PyTorch out-of-memory error from a compressed candidate's
+`evaluation` or `timing` computation can fail that candidate without objectives.
+Setup, source checks, writing, verification, uploads, and finalization stay outside
+these receipt phases. Continuing requires a matching failed receipt and selected
+configuration, a durable nonzero exit from the owned child, no live owned process
+group, confirmed terminal cleanup of the saved tracking run, and unchanged source,
+input, and environment provenance. During evaluation or timing, dense-reference
+OOMs, wrapped OOMs, ordinary `MemoryError`, timeouts, interruptions, and uncertain
+cleanup still stop execution. The existing conversion-failure policy remains unchanged.
+A memory failure describes this execution context; it does not establish that the
+candidate cannot fit on other hardware or under different contention. No failed
+request is automatically retried or retuned, and budgets are not extended.
+The stopped first pilot remains historical evidence; a later launch needs a
+separately reviewed new study context.
+
+Sampler state is saved after suggestions and
 after tell. Database and checkpoint writes are separate transactions: a mismatch
 stops for reconciliation rather than silently reseeding or claiming uninterrupted
 sampling. Missing child identity or durable exit evidence also requires review.

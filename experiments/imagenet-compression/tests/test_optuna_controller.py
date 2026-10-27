@@ -776,3 +776,130 @@ def test_signal_handlers_are_lifecycle_scoped_and_restore_on_failure():
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
+
+
+
+def failed_computation(context, record, phase="evaluation"):
+    """Use the normal provenance fixture and a real, reaped child; never allocate excess memory."""
+    fake_success(context, record, 1)
+    child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(1)"], start_new_session=True)
+    identity = controller.process_identity(child.pid)
+    try:
+        assert child.wait(timeout=3) == 1
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=3)
+    receipt = controller.read_json(record["status_path"])
+    receipt.update(state="failed", phase=phase, failure={"exception_type": "torch.OutOfMemoryError", "cause_types": []},
+                   process={"pid": identity["pid"], "hostname": identity["hostname"]})
+    receipt.pop("artifacts")
+    controller.atomic_json(Path(record["status_path"]), receipt)
+    controller.atomic_json(Path(receipt["output_directory"]) / "failure.json", {
+        "run_id": receipt["run_id"], "error_type": "OutOfMemoryError", "execution_input_error": None,
+        "error": "synthetic allocation failure; no memory exhausted", "traceback": "synthetic"})
+    record.update(exit_code=1, process=identity, outcome="exited")
+    controller.atomic_json(Path(record["directory"]) / "attempt.json", record)
+    return record
+
+
+def terminal_cleanup(record, *args):
+    return {"run_id": controller.read_json(record["status_path"])["run_id"], "status": "FAILED"}
+
+
+@pytest.mark.parametrize("stop_at_limit", [False, True])
+def test_computation_oom_continues_within_original_limits_without_objectives(study_context, monkeypatch, stop_at_limit):
+    context = study_context
+    context["definition"]["limits"]["total_attempts"] = 4
+    launched = []
+    monkeypatch.setattr(controller, "compatibility", contract_for)
+    monkeypatch.setattr(controller, "cleanup_tracking", terminal_cleanup)
+    def supervise(context, record, seconds, *, termination=None):
+        launched.append(record["trial_number"])
+        if record["trial_number"] == 1 or (stop_at_limit and record["trial_number"] == 2):
+            return failed_computation(context, record, "evaluation" if record["trial_number"] == 1 else "timing")
+        return fake_success(context, record, seconds)
+    monkeypatch.setattr(controller, "supervise", supervise)
+    result = controller.run_controller(context)
+    study, metadata = controller.open_study(context, contract_for(context))
+    assert launched == ([0, 1, 2] if stop_at_limit else [0, 1, 2, 3])
+    assert result["asked"] == len(launched)
+    failed = [trial for trial in study.trials if trial.state == optuna.trial.TrialState.FAIL]
+    assert [t.number for t in failed] == ([1, 2] if stop_at_limit else [1])
+    assert all(t.values is None for t in failed)
+    assert metadata["consecutive_candidate_failures"] == (2 if stop_at_limit else 0)
+    for trial in failed:
+        record = controller.read_json(trial.user_attrs["attempt_path"])
+        assert record["failure_category"] == "candidate" and record["cleanup"]["status"] == "FAILED"
+        assert (Path(controller.read_json(record["status_path"])["output_directory"]) / "failure.json").exists()
+
+
+@pytest.mark.parametrize("problem", [
+    "dense", "wrapped", "ordinary_memory", "unknown", "setup", "verification", "upload", "finalization",
+    "invalid_receipt", "wrong_configuration", "wrong_child", "missing_exit", "live_group", "timeout", "interrupt",
+    "cleanup_error", "wrong_cleanup_run", "nonterminal_cleanup", "input_verification", "source_changed",
+    "input_changed", "environment_changed", "recorded_environment_changed", "archive_changed",
+])
+def test_computation_oom_requires_consistent_evidence_before_continuing(study_context, monkeypatch, problem):
+    context = study_context
+    # Put a compressed candidate first except for the explicit dense-reference case.
+    if problem != "dense":
+        context["definition"]["pilot_cases"] = context["definition"]["pilot_cases"][1:]
+    monkeypatch.setattr(controller, "compatibility", contract_for)
+    monkeypatch.setattr(controller, "cleanup_tracking", terminal_cleanup)
+    contract, study, metadata, trial, record = create_pending(context)
+    failed_computation(context, record)
+    receipt = controller.read_json(record["status_path"])
+    output = Path(receipt["output_directory"])
+    if problem == "wrapped":
+        receipt["failure"] = {"exception_type": "builtins.RuntimeError", "cause_types": ["torch.OutOfMemoryError"]}
+    elif problem in ("ordinary_memory", "unknown"):
+        receipt["failure"]["exception_type"] = "builtins.MemoryError" if problem == "ordinary_memory" else "builtins.RuntimeError"
+    elif problem in ("setup", "verification", "upload", "finalization"):
+        receipt["phase"] = {"setup": "measurement", "verification": "checkpoint_verification",
+                            "upload": "artifact_upload", "finalization": "run_finalization"}[problem]
+    elif problem == "invalid_receipt":
+        receipt["state"] = "running"
+    elif problem == "wrong_configuration":
+        receipt["configuration_sha256"] = "stale"
+    elif problem == "wrong_child":
+        receipt["process"]["pid"] += 100000
+    elif problem == "missing_exit":
+        saved = controller.read_json(Path(record["directory"]) / "attempt.json")
+        saved["exit_code"] = None
+        controller.atomic_json(Path(record["directory"]) / "attempt.json", saved)
+    elif problem == "live_group":
+        monkeypatch.setattr(controller, "group_members", lambda identity: [identity["pid"]])
+    elif problem in ("timeout", "interrupt"):
+        record["interruption"] = "timeout" if problem == "timeout" else "interrupted"
+    elif problem == "cleanup_error":
+        def unavailable(*args):
+            raise RuntimeError("synthetic tracking uncertainty")
+        monkeypatch.setattr(controller, "cleanup_tracking", unavailable)
+    elif problem in ("wrong_cleanup_run", "nonterminal_cleanup"):
+        cleanup = terminal_cleanup(record)
+        cleanup["run_id" if problem == "wrong_cleanup_run" else "status"] = "wrong"
+        monkeypatch.setattr(controller, "cleanup_tracking", lambda *args: cleanup)
+    elif problem == "input_verification":
+        failure = controller.read_json(output / "failure.json")
+        failure["execution_input_error"] = "Execution inputs changed during evaluation"
+        controller.atomic_json(output / "failure.json", failure)
+    elif problem == "source_changed":
+        source = runner.EXPERIMENT_DIR / "run_experiment.py"
+        source.write_text(source.read_text() + "\n# changed during execution\n")
+    elif problem == "input_changed":
+        (output / "evaluation_manifest.json").write_text('{"images": ["changed"]}\n')
+    elif problem == "environment_changed":
+        monkeypatch.setattr(controller, "compatibility", lambda context: {**contract_for(context), "machine": "different"})
+    elif problem == "recorded_environment_changed":
+        provenance = controller.read_json(output / "provenance.json")
+        provenance["environment"]["packages"]["torch"] = "different"
+        controller.atomic_json(output / "provenance.json", provenance)
+    elif problem == "archive_changed":
+        (output / "source.zip").write_bytes(b"not an intact archive")
+    controller.atomic_json(Path(record["status_path"]), receipt)
+    controller.complete_attempt(context, contract, study, trial, record, metadata)
+    assert study.trials[0].state == optuna.trial.TrialState.FAIL and study.trials[0].values is None
+    assert metadata["stopped_reason"] and record["failure_category"] == "infrastructure"
+    assert len(list((context["state_dir"] / "attempts").glob("*/attempt.json"))) == 1
+    assert (output / "failure.json").exists()

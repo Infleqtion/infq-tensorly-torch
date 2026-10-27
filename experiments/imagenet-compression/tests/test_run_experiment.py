@@ -1398,6 +1398,7 @@ def test_extra_configuration_changed_after_upload_prevents_success(execution, mo
 @pytest.mark.parametrize("variant,late_failure", [
     ("dense", None), ("compressed", None),
     ("compressed", "late upload"), ("dense", "finish"),
+    ("compressed", "evaluation_oom"), ("compressed", "timing_oom"),
 ])
 def test_actual_runner_cli_artifacts_reach_controller_collector(execution_repo, tmp_path, monkeypatch,
                                                                variant, late_failure):
@@ -1454,6 +1455,10 @@ with pytest.MonkeyPatch.context() as patch:
     runner.write_json(work / 'preflight.json', {'contract': contract,
         'base': context['base'], 'study': str(study), 'template': str(template)})
     tracking.fail = late_failure
+    if late_failure in ('evaluation_oom', 'timing_oom'):
+        def allocation_failure(*args, **kwargs):
+            raise torch.OutOfMemoryError('synthetic candidate OOM; no actual allocation')
+        patch.setattr(runner, 'evaluate' if late_failure == 'evaluation_oom' else 'measure_latency', allocation_failure)
     code = runner.main(['--config',str(selected),'--status-file',str(work / 'runner_status.json'),
                         '--provenance-config',str(study),'--provenance-config',str(template)])
     runner.write_json(work / 'tracking-events.json',tracking.events)
@@ -1484,9 +1489,21 @@ raise SystemExit(code)
               "configuration_sha256": runner.file_sha256(selected), "status_path": str(work / "runner_status.json"),
               "exit_code": code, "process": identity,
               "layers": effective["compression"]["layers"] if effective["compression"] else {}}
+    record["outcome"] = "exited"
     controller.atomic_json(work / "attempt.json", record)
     receipt = controller.read_json(work / "runner_status.json")
     output = Path(receipt["output_directory"])
+    if late_failure in ("evaluation_oom", "timing_oom"):
+        assert receipt["state"] == "failed" and receipt["phase"] == late_failure.removesuffix("_oom")
+        assert receipt["failure"]["exception_type"] == "torch.OutOfMemoryError"
+        assert not (output / "measurements.json").exists()
+        assert controller.read_json(work / "tracking-events.json")[-1] == "FAILED"
+        # Remote cleanup is recording-only; all other evidence comes from the actual child.
+        record["cleanup"] = {"run_id": receipt["run_id"], "status": "FAILED"}
+        monkeypatch.setattr(controller, "compatibility", lambda context: metadata["contract"])
+        assert controller.classify_failure(record, context, metadata["contract"]) == "candidate", record
+        assert not controller.group_members(identity)
+        return
     measurements = controller.read_json(output / "measurements.json")
     assert measurements["accuracy"]["top1_percent"] == 100 / 3
     assert measurements["storage"]["parameter_count"] == (206 if variant == "dense" else 93)
@@ -1518,3 +1535,36 @@ raise SystemExit(code)
     for path in (context["path"], context["base_path"]):
         assert f"upload {path.name}" in events[:events.index("load baseline")]
     controller.atomic_json(work / "collected-result.json", result)
+
+
+
+@pytest.mark.parametrize("phase", ["measurement", "evaluation", "timing"])
+@pytest.mark.parametrize("changed_source", [False, True])
+def test_computation_oom_receipt_records_exact_phase_and_input_failure(execution, monkeypatch, tmp_path, phase, changed_source):
+    config, _, _, events = execution
+    status_path = tmp_path / "oom_status.json"
+    error = torch.OutOfMemoryError("synthetic OOM; no actual allocation")
+    target = {"measurement": "make_loader", "evaluation": "evaluate", "timing": "measure_latency"}[phase]
+    original_evaluate = runner.evaluate
+    def check_evaluation(*args, **kwargs):
+        assert json.loads(status_path.read_text())["phase"] == "evaluation"
+        return original_evaluate(*args, **kwargs)
+    monkeypatch.setattr(runner, "evaluate", check_evaluation)
+    def fail(*args, **kwargs):
+        assert json.loads(status_path.read_text())["phase"] == phase
+        if changed_source:
+            source = runner.EXPERIMENT_DIR / "run_experiment.py"
+            source.write_text(source.read_text() + "\n# source changed during computation\n")
+        raise error
+    monkeypatch.setattr(runner, target, fail)
+    assert runner.main(["--config", str(runner.EXPERIMENT_DIR / "configs/test.yaml"),
+                        "--status-file", str(status_path)]) == 1
+    receipt = json.loads(status_path.read_text())
+    assert receipt["state"] == "failed" and receipt["phase"] == phase
+    assert receipt["failure"] == {"exception_type": "torch.OutOfMemoryError", "cause_types": []}
+    output = Path(receipt["output_directory"])
+    failure = json.loads((output / "failure.json").read_text())
+    assert failure["error_type"] == "OutOfMemoryError" and "synthetic OOM" in failure["traceback"]
+    assert bool(failure["execution_input_error"]) == changed_source
+    assert events[-1] == "FAILED" and "FINISHED" not in events
+    assert "measurements.json" not in receipt.get("artifacts", {})

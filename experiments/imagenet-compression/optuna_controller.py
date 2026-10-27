@@ -580,6 +580,60 @@ def supervise(context, record, seconds, *, termination=None):
     return record
 
 
+def validate_input_provenance(context, contract, record, output):
+    """Check the same recorded inputs for successful results and candidate-memory failures."""
+    path = Path(record["configuration_path"])
+    effective, _ = runner.load_config(path)
+    if ((output / "original_config.yaml").read_bytes() != path.read_bytes()
+            or read_json(output / "effective_config.json") != effective):
+        raise RuntimeError("Saved configuration differs from the requested configuration")
+    run = read_json(output / "run.json")
+    provenance = read_json(output / "provenance.json")
+    source = read_json(output / "source.json")
+    for record_with_hashes in (run, provenance):
+        if (record_with_hashes.get("original_config_file_sha256") != record["configuration_sha256"]
+                or record_with_hashes.get("effective_config_file_sha256") != runner.file_sha256(output / "effective_config.json")):
+            raise RuntimeError("Configuration provenance hashes disagree")
+    if (provenance.get("manifest_sha256") != contract["manifest_sha256"]
+            or runner.file_sha256(output / "evaluation_manifest.json") != contract["manifest_sha256"]
+            or provenance.get("weights") != contract["weights"] or provenance.get("cache") != contract["cache"]
+            or provenance.get("seeds") != {"runtime": effective["runtime"]["seed"], "timing": effective["timing"]["seed"]}):
+        raise RuntimeError("Input, cache, or seed provenance differs from study inputs")
+    environment = provenance.get("environment", {})
+    if environment.get("cpu") is None or environment.get("cuda_available") is None:
+        raise RuntimeError("Missing runtime environment provenance")
+    for package, version in environment.get("packages", {}).items():
+        if version is not None and contract["packages"].get(re.sub(r"[-_.]+", "-", package).lower()) != version:
+            raise RuntimeError(f"Runtime package differs from compatible environment: {package}")
+    if Path(environment.get("tltorch_path", "")).resolve() != runner.REPOSITORY_ROOT / "tltorch/__init__.py":
+        raise RuntimeError("Runtime library imports did not resolve to this checkout")
+    if environment.get("repository_revision") != source.get("commit"):
+        raise RuntimeError("Runtime environment revision differs from source snapshot")
+    hashes = source.get("source_files_sha256", {})
+    config_name = path.relative_to(runner.REPOSITORY_ROOT).as_posix()
+    expected_hashes = {**contract["source_files_sha256"], config_name: record["configuration_sha256"]}
+    normalized_hashes = {**{n: None for n, value in expected_hashes.items() if value is None}, **hashes}
+    if normalized_hashes != expected_hashes or source.get("execution_inputs_match_commit") is not True:
+        raise RuntimeError("Recorded source scope differs from compatible execution inputs")
+    if provenance.get("git") != source:
+        raise RuntimeError("Source commit and provenance disagree")
+    for name, expected in hashes.items():
+        try:
+            committed = digest(inputs.git(runner.REPOSITORY_ROOT, "show", f"{source['commit']}:{name}"))
+        except subprocess.CalledProcessError:
+            committed = None
+        if committed != expected:
+            raise RuntimeError(f"Source record differs from its committed bytes: {name}")
+    if runner.file_sha256(output / "source.zip") != source.get("source_archive_sha256"):
+        raise RuntimeError("Source archive hash disagrees with its provenance")
+    with zipfile.ZipFile(output / "source.zip") as archive:
+        expected_entries = {name for name, value in hashes.items() if value is not None}
+        if set(archive.namelist()) != expected_entries or len(archive.namelist()) != len(expected_entries):
+            raise RuntimeError("Source archive has missing, duplicate, or unexpected entries")
+        if any(digest(archive.read(name)) != hashes[name] for name in expected_entries):
+            raise RuntimeError("Archived source bytes disagree with committed source hashes")
+
+
 def collect_result(context, contract, record):
     """Accept only a zero exit plus a complete, consistent chain of existing evidence."""
     if record.get("exit_code") != 0 or record.get("interruption") or record.get("needs_cleanup"):
@@ -614,7 +668,6 @@ def collect_result(context, contract, record):
     if read_json(output / "effective_config.json") != effective:
         raise RuntimeError("Saved effective configuration differs from the requested configuration")
     run = read_json(output / "run.json")
-    provenance = read_json(output / "provenance.json")
     local = read_json(output / "model_verification.json")
     remote = read_json(output / "mlflow_model_verification.json")
     source = read_json(output / "source.json")
@@ -634,46 +687,9 @@ def collect_result(context, contract, record):
                                ("source.zip", source.get("source_archive_sha256"))):
         if expected is None or runner.file_sha256(output / filename) != expected:
             raise RuntimeError(f"Changed verified artifact: {filename}")
-    for record_with_hashes in (run, provenance):
-        if (record_with_hashes.get("original_config_file_sha256") != record["configuration_sha256"]
-                or record_with_hashes.get("effective_config_file_sha256") != runner.file_sha256(output / "effective_config.json")):
-            raise RuntimeError("Configuration provenance hashes disagree")
-    if (provenance.get("manifest_sha256") != contract["manifest_sha256"]
-            or runner.file_sha256(output / "evaluation_manifest.json") != contract["manifest_sha256"]
-            or provenance.get("weights") != contract["weights"] or provenance.get("cache") != contract["cache"]
-            or provenance.get("seeds") != {"runtime": effective["runtime"]["seed"], "timing": effective["timing"]["seed"]}):
-        raise RuntimeError("Input, cache, or seed provenance differs from study inputs")
-    environment = provenance.get("environment", {})
-    if environment.get("cpu") is None or environment.get("cuda_available") is None:
-        raise RuntimeError("Missing runtime environment provenance")
-    for package, version in environment.get("packages", {}).items():
-        if version is not None and contract["packages"].get(re.sub(r"[-_.]+", "-", package).lower()) != version:
-            raise RuntimeError(f"Runtime package differs from compatible environment: {package}")
-    if Path(environment.get("tltorch_path", "")).resolve() != runner.REPOSITORY_ROOT / "tltorch/__init__.py":
-        raise RuntimeError("Runtime library imports did not resolve to this checkout")
-    if environment.get("repository_revision") != source.get("commit"):
-        raise RuntimeError("Runtime environment revision differs from source snapshot")
-    hashes = source.get("source_files_sha256", {})
-    config_name = path.relative_to(runner.REPOSITORY_ROOT).as_posix()
-    expected_hashes = {**contract["source_files_sha256"], config_name: record["configuration_sha256"]}
-    normalized_hashes = {**{n: None for n, value in expected_hashes.items() if value is None}, **hashes}
-    if normalized_hashes != expected_hashes or source.get("execution_inputs_match_commit") is not True:
-        raise RuntimeError("Recorded source scope differs from compatible execution inputs")
-    if verified.get("commit") != source.get("commit") or provenance.get("git") != source:
+    if verified.get("commit") != source.get("commit"):
         raise RuntimeError("Source commit and verification disagree")
-    for name, expected in hashes.items():
-        try:
-            committed = digest(inputs.git(runner.REPOSITORY_ROOT, "show", f"{source['commit']}:{name}"))
-        except subprocess.CalledProcessError:
-            committed = None
-        if committed != expected:
-            raise RuntimeError(f"Source record differs from its committed bytes: {name}")
-    with zipfile.ZipFile(output / "source.zip") as archive:
-        expected_entries = {name for name, value in hashes.items() if value is not None}
-        if set(archive.namelist()) != expected_entries or len(archive.namelist()) != len(expected_entries):
-            raise RuntimeError("Source archive has missing, duplicate, or unexpected entries")
-        if any(digest(archive.read(name)) != hashes[name] for name in expected_entries):
-            raise RuntimeError("Archived source bytes disagree with committed source hashes")
+    validate_input_provenance(context, contract, record, output)
     measurements = read_json(output / "measurements.json")
     if measurements.get("variant") != ("compressed" if record["layers"] else "dense"):
         raise RuntimeError("Measurement variant differs from the request")
@@ -716,7 +732,56 @@ def rank_signature(layers):
     return signature
 
 
-def classify_failure(record):
+def confirm_candidate_oom(context, contract, record, receipt):
+    """Require a dead owned child, terminal tracking, and intact inputs before continuing."""
+    if (record.get("interruption") or record.get("cleanup_error") or record.get("supervisor_error")
+            or type(record.get("exit_code")) is not int or record["exit_code"] == 0):
+        raise RuntimeError("Candidate OOM has no uninterrupted nonzero exit")
+    saved = read_json(Path(record["directory"]) / "attempt.json")
+    keys = ("trial_number", "directory", "configuration_path", "configuration_sha256", "status_path",
+            "layers", "exit_code", "process")
+    if (saved.get("outcome") != "exited" or saved.get("interruption") or saved.get("needs_cleanup")
+            or any(saved.get(key) != record.get(key) for key in keys)):
+        raise RuntimeError("Candidate OOM lacks consistent durable child exit evidence")
+    identity = record.get("process")
+    if not identity or group_members(identity):
+        raise RuntimeError("Owned child identity is missing or its process group remains alive")
+    path = Path(record["configuration_path"])
+    tracking = context["base"]["tracking"]
+    if (receipt.get("schema_version") != 1 or receipt.get("state") != "failed"
+            or receipt.get("configuration_path") != str(path)
+            or receipt.get("configuration_sha256") != record["configuration_sha256"]
+            or digest(path.read_bytes()) != record["configuration_sha256"]
+            or receipt.get("tracking_uri") != tracking["uri"] or receipt.get("workspace") != tracking["workspace"]
+            or receipt.get("process", {}).get("pid") != identity["pid"]
+            or receipt.get("process", {}).get("hostname") != identity["hostname"]):
+        raise RuntimeError("Failed receipt does not match the selected configuration and owned child")
+    effective, _ = runner.load_config(path)
+    compression = effective["compression"]
+    if not record["layers"] or not compression or compression["layers"] != record["layers"]:
+        raise RuntimeError("Candidate OOM requires the requested compressed model")
+    cleanup = record.get("cleanup") or {}
+    if (not receipt.get("run_id") or cleanup.get("run_id") != receipt["run_id"]
+            or cleanup.get("status") not in ("FAILED", "FINISHED", "KILLED")):
+        raise RuntimeError("Tracking cleanup did not confirm the saved run is terminal")
+    output = Path(receipt["output_directory"])
+    if not output.is_absolute() or not output.resolve().is_relative_to(Path(context["base"]["output_root"])):
+        raise RuntimeError("Output is outside the configured output root")
+    run = read_json(output / "run.json")
+    failure = read_json(output / "failure.json")
+    if (not receipt.get("experiment_id") or run.get("experiment_id") != receipt["experiment_id"]
+            or run.get("run_id") != receipt["run_id"] or run.get("workspace") != tracking["workspace"]
+            or failure.get("run_id") != receipt["run_id"] or failure.get("error_type") != "OutOfMemoryError"
+            or "execution_input_error" not in failure or failure["execution_input_error"] is not None):
+        raise RuntimeError("Failure/run evidence disagrees or execution-input verification failed")
+    validate_input_provenance(context, contract, record, output)
+    source = read_json(output / "source.json")
+    runner.verify_execution_inputs(runner.REPOSITORY_ROOT, runner.EXPERIMENT_DIR, path, source)
+    if canonical(compatibility(context)) != canonical(contract):
+        raise RuntimeError("Execution context changed during the failed candidate")
+
+
+def classify_failure(record, context, contract):
     """Only recognized fitting failures can consume a candidate and permit another launch."""
     if record.get("needs_cleanup"):
         return "infrastructure"
@@ -731,6 +796,13 @@ def classify_failure(record):
                      "numpy.linalg.LinAlgError", "torch.linalg.LinAlgError")
     if phase == "conversion" and (record.get("interruption") == "timeout" or any(t in fitting_types for t in types)):
         return "candidate"
+    if phase in ("evaluation", "timing") and failure.get("exception_type") in fitting_types[:2]:
+        try:
+            confirm_candidate_oom(context, contract, record, receipt)
+        except Exception as error:
+            record["candidate_failure_rejection"] = f"{type(error).__name__}: {error}"
+        else:
+            return "candidate"
     return "infrastructure"
 
 
@@ -756,7 +828,7 @@ def complete_attempt(context, contract, study, trial, record, metadata):
             record["runner_failure"] = {key: failed_receipt.get(key) for key in ("phase", "failure")}
         except (OSError, ValueError):
             record["runner_failure"] = None
-        category = classify_failure(record)
+        category = classify_failure(record, context, contract)
         record.update(outcome="failed", failure_category=category)
         trial.set_user_attr("failure", {key: record.get(key) for key in (
             "failure_category", "interruption", "exit_code", "needs_cleanup", "cleanup_error")})

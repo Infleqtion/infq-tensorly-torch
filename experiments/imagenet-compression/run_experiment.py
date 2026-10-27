@@ -1052,9 +1052,12 @@ def run_experiment(config, original_config, *, config_path, provenance_configs=N
                                       batch_size=runtime["batch_size"], workers=runtime["workers"], seed=runtime["seed"])
                 inputs = torch.randn(*timing["input_shape"], device=device, dtype=torch.float32,
                                      generator=torch.Generator(device=device).manual_seed(timing["seed"]))
-                measurement = {"accuracy": evaluate(model, batches, device),
-                               "latency": measure_latency(model, inputs, warmup=timing["warmup"], repeats=timing["repeats"]),
-                               "storage": storage}
+                update_status(status, phase="evaluation")
+                accuracy = evaluate(model, batches, device)
+                update_status(status, phase="timing")
+                latency = measure_latency(model, inputs, warmup=timing["warmup"], repeats=timing["repeats"])
+                update_status(status, phase="measurement")
+                measurement = {"accuracy": accuracy, "latency": latency, "storage": storage}
                 if model_fingerprint(source) != original_state:
                     raise RuntimeError("Evaluation changed pretrained source parameters or buffers")
                 if conversion_seconds is not None:
