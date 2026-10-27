@@ -1,0 +1,220 @@
+{
+  "fraction_0.75": {
+    "replacements": [
+      {
+        "name": "layer4.0.conv2",
+        "aliases": [],
+        "factorization": "Tucker",
+        "requested_rank": 0.75,
+        "actual_rank": [
+          390,
+          390,
+          3,
+          3
+        ],
+        "max_parameters": null,
+        "original": {
+          "parameter_count": 2359296,
+          "parameter_bytes": 9437184,
+          "buffer_bytes": 0
+        },
+        "compressed": {
+          "parameter_count": 1768278,
+          "parameter_bytes": 7073112,
+          "buffer_bytes": 0
+        },
+        "weight_error": {
+          "absolute": 9.663365624035283,
+          "relative": 0.36211248153244446
+        }
+      },
+      {
+        "name": "layer4.1.conv2",
+        "aliases": [],
+        "factorization": "Tucker",
+        "requested_rank": 0.75,
+        "actual_rank": [
+          390,
+          390,
+          3,
+          3
+        ],
+        "max_parameters": null,
+        "original": {
+          "parameter_count": 2359296,
+          "parameter_bytes": 9437184,
+          "buffer_bytes": 0
+        },
+        "compressed": {
+          "parameter_count": 1768278,
+          "parameter_bytes": 7073112,
+          "buffer_bytes": 0
+        },
+        "weight_error": {
+          "absolute": 3.619310907087743,
+          "relative": 0.1784848114886298
+        }
+      },
+      {
+        "name": "fc",
+        "aliases": [],
+        "factorization": "BlockTT",
+        "requested_rank": 0.75,
+        "actual_rank": [
+          1,
+          68,
+          68,
+          1
+        ],
+        "max_parameters": null,
+        "original": {
+          "parameter_count": 513000,
+          "parameter_bytes": 2052000,
+          "buffer_bytes": 0
+        },
+        "compressed": {
+          "parameter_count": 381800,
+          "parameter_bytes": 1527200,
+          "buffer_bytes": 0
+        },
+        "weight_error": {
+          "absolute": 22.767671389400604,
+          "relative": 0.4580949005757862
+        }
+      }
+    ],
+    "replaced_layers": {
+      "original": {
+        "parameter_count": 5231592,
+        "parameter_bytes": 20926368,
+        "buffer_bytes": 0
+      },
+      "compressed": {
+        "parameter_count": 3918356,
+        "parameter_bytes": 15673424,
+        "buffer_bytes": 0
+      }
+    },
+    "model": {
+      "original": {
+        "parameter_count": 11689512,
+        "parameter_bytes": 46758048,
+        "buffer_bytes": 38560
+      },
+      "compressed": {
+        "parameter_count": 10376276,
+        "parameter_bytes": 41505104,
+        "buffer_bytes": 38560
+      }
+    }
+  },
+  "fraction_0.50": {
+    "replacements": [
+      {
+        "name": "layer4.0.conv2",
+        "aliases": [],
+        "factorization": "Tucker",
+        "requested_rank": 0.5,
+        "actual_rank": [
+          310,
+          310,
+          3,
+          3
+        ],
+        "max_parameters": null,
+        "original": {
+          "parameter_count": 2359296,
+          "parameter_bytes": 9437184,
+          "buffer_bytes": 0
+        },
+        "compressed": {
+          "parameter_count": 1182358,
+          "parameter_bytes": 4729432,
+          "buffer_bytes": 0
+        },
+        "weight_error": {
+          "absolute": 13.208860250412778,
+          "relative": 0.49497176755844263
+        }
+      },
+      {
+        "name": "layer4.1.conv2",
+        "aliases": [],
+        "factorization": "Tucker",
+        "requested_rank": 0.5,
+        "actual_rank": [
+          310,
+          310,
+          3,
+          3
+        ],
+        "max_parameters": null,
+        "original": {
+          "parameter_count": 2359296,
+          "parameter_bytes": 9437184,
+          "buffer_bytes": 0
+        },
+        "compressed": {
+          "parameter_count": 1182358,
+          "parameter_bytes": 4729432,
+          "buffer_bytes": 0
+        },
+        "weight_error": {
+          "absolute": 5.517999745971718,
+          "relative": 0.2721178615866815
+        }
+      },
+      {
+        "name": "fc",
+        "aliases": [],
+        "factorization": "BlockTT",
+        "requested_rank": 0.5,
+        "actual_rank": [
+          1,
+          56,
+          56,
+          1
+        ],
+        "max_parameters": null,
+        "original": {
+          "parameter_count": 513000,
+          "parameter_bytes": 2052000,
+          "buffer_bytes": 0
+        },
+        "compressed": {
+          "parameter_count": 260840,
+          "parameter_bytes": 1043360,
+          "buffer_bytes": 0
+        },
+        "weight_error": {
+          "absolute": 31.754583234644933,
+          "relative": 0.6389152584340407
+        }
+      }
+    ],
+    "replaced_layers": {
+      "original": {
+        "parameter_count": 5231592,
+        "parameter_bytes": 20926368,
+        "buffer_bytes": 0
+      },
+      "compressed": {
+        "parameter_count": 2625556,
+        "parameter_bytes": 10502224,
+        "buffer_bytes": 0
+      }
+    },
+    "model": {
+      "original": {
+        "parameter_count": 11689512,
+        "parameter_bytes": 46758048,
+        "buffer_bytes": 38560
+      },
+      "compressed": {
+        "parameter_count": 9083476,
+        "parameter_bytes": 36333904,
+        "buffer_bytes": 38560
+      }
+    }
+  }
+}

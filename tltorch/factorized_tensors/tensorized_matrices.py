@@ -12,6 +12,7 @@ from tensorly import tenalg
 from tensorly.decomposition import tensor_train_matrix, parafac, tucker
 
 from .core import TensorizedTensor, _ensure_tuple
+from .tt_rank import resolve_tt_rank
 from .factorized_tensors import CPTensor, TuckerTensor, DenseTensor
 from ..utils.parameter_list import FactorList
 
@@ -315,7 +316,18 @@ def validate_block_tt_rank(tensorized_shape, rank):
     factor_shapes = [(s, )*ndim if isinstance(s, int) else s for s in tensorized_shape]
     factor_shapes = list(math.prod(e) for e in zip(*factor_shapes))
 
-    return tl.tt_tensor.validate_tt_rank(factor_shapes, rank)
+    if ndim == 1 and (rank == 'same' or isinstance(rank, float)):
+        # A single core stores the full tensor; there is no internal bond to truncate.
+        if rank != 'same' and rank != 1.0:
+            raise ValueError(
+                "A single BlockTT core has no internal rank to adjust for a fractional target. "
+                "Use rank='same', rank=1.0, an integer or boundary ranks (1, 1), "
+                "or explicitly choose multiple tensorized mode pairs."
+            )
+        rank = (1, 1)
+
+    return resolve_tt_rank(factor_shapes, rank,
+                           tensor_numel=math.prod(tensorized_shape_to_shape(tensorized_shape)))
 
 
 class BlockTT(TensorizedTensor, name='BlockTT'):
@@ -515,16 +527,17 @@ class BlockTT(TensorizedTensor, name='BlockTT'):
     #     tensor = matrix.reshape((*n_matrices, *tensorized_row_shape, *tensorized_column_shape))
     @classmethod
     def from_tensor(cls, tensor, tensorized_shape, rank, **kwargs):
-        rank = tl.tt_matrix.validate_tt_matrix_rank(tensor.shape, rank)
+        rank = validate_block_tt_rank(tensorized_shape, rank)
 
         with torch.no_grad():
             factors = tensor_train_matrix(tensor, rank, **kwargs)
         factors = [nn.Parameter(f.contiguous()) for f in factors]
 
-        return cls(factors, tensorized_shape, rank)
+        actual_rank = tuple([f.shape[0] for f in factors] + [1])
+        return cls(factors, tensorized_shape, actual_rank)
 
     def init_from_tensor(self, tensor, **kwargs):
-        rank = tl.tt_matrix.validate_tt_matrix_rank(tensor.shape, self.rank)
+        rank = validate_block_tt_rank(self.tensorized_shape, self.rank)
 
         with torch.no_grad():
             factors = tensor_train_matrix(tensor, rank, **kwargs)

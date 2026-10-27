@@ -10,6 +10,7 @@ from tensorly import tenalg
 from tensorly.decomposition import parafac, tucker, tensor_train
 
 from .core import FactorizedTensor
+from .tt_rank import resolve_tt_rank
 from ..utils import FactorList
 
 
@@ -298,6 +299,7 @@ class TuckerTensor(FactorizedTensor, name='Tucker'):
 
         self.core = nn.Parameter(core.contiguous())
         self.factors = FactorList([nn.Parameter(f.contiguous()) for f in factors])
+        self.rank = tuple(core.shape)
         return self
 
     @property
@@ -380,7 +382,7 @@ class TTTensor(FactorizedTensor, name='TT'):
     
     @classmethod
     def new(cls, shape, rank, device=None, dtype=None, **kwargs):
-        rank = tl.tt_tensor.validate_tt_rank(shape, rank)
+        rank = resolve_tt_rank(shape, rank)
 
         # Avoid the issues with ParameterList
         factors = [nn.Parameter(torch.empty((rank[i], s, rank[i+1]), device=device, dtype=dtype)) for i, s in enumerate(shape)]
@@ -390,18 +392,21 @@ class TTTensor(FactorizedTensor, name='TT'):
     @classmethod
     def from_tensor(cls, tensor, rank='same', **kwargs):
         shape = tensor.shape
-        rank = tl.tt_tensor.validate_tt_rank(shape, rank)
+        rank = resolve_tt_rank(shape, rank)
 
         with torch.no_grad():
             # TODO: deal properly with wrong kwargs
-            factors = tensor_train(tensor, rank)
+            factors = ([tensor.reshape(1, -1, 1).clone()] if tensor.ndim == 1
+                       else tensor_train(tensor, rank))
         
         return cls([nn.Parameter(f.contiguous()) for f in factors])
 
     def init_from_tensor(self, tensor, **kwargs):
+        rank = resolve_tt_rank(tensor.shape, self.rank)
         with torch.no_grad():
             # TODO: deal properly with wrong kwargs
-            factors = tensor_train(tensor, self.rank)
+            factors = ([tensor.reshape(1, -1, 1).clone()] if tensor.ndim == 1
+                       else tensor_train(tensor, rank))
         
         self.factors = FactorList([nn.Parameter(f.contiguous()) for f in factors])
         self.rank = tuple([f.shape[0] for f in factors] + [1])

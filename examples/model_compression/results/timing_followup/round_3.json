@@ -1,0 +1,911 @@
+{
+  "round": 3,
+  "pid": 40331,
+  "command": [
+    "/home/rafael_magaldi/.cache/tltorch-model-compression/venv/bin/python",
+    "-B",
+    "-u",
+    "-m",
+    "examples.model_compression.timing_followup",
+    "--round",
+    "3",
+    "--output",
+    "examples/model_compression/results/timing_followup/round_3.json"
+  ],
+  "working_directory": "/home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression",
+  "environment": {
+    "python": "3.12.3",
+    "packages": {
+      "torch": "2.5.1+cpu",
+      "torchvision": "0.20.1+cpu",
+      "tensorly": "0.9.0",
+      "numpy": "2.5.2",
+      "scipy": "1.17.1",
+      "Pillow": "12.3.0",
+      "nbformat": "5.11.1",
+      "nbclient": "0.11.0",
+      "ipykernel": "7.3.0"
+    },
+    "tltorch_version": "0.5.0",
+    "tltorch_path": "/home/rafael_magaldi/Documents/infq-tensorly-torch-model-compression/tltorch/__init__.py",
+    "platform": "Linux-6.17.0-1033-oem-x86_64-with-glibc2.39",
+    "cpu": "Intel(R) Core(TM) Ultra 9 285H",
+    "cpu_count": 16,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "cuda_available": false,
+    "cuda_version": null,
+    "cuda_devices": [],
+    "threads": 4,
+    "interop_threads": 1,
+    "backend": {
+      "deterministic_algorithms": true,
+      "matmul_precision": "highest",
+      "cuda_matmul_tf32": false,
+      "cudnn_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "mkldnn_enabled": true,
+      "cublas_workspace_config": ":4096:8",
+      "omp_num_threads": null,
+      "mkl_num_threads": null
+    },
+    "repository_revision": "da2df26205971b06f3d06fc63b492e05a8404482",
+    "working_tree_dirty": true,
+    "experiment_sha256": "f4067715e24e01ec991a56967b6dc545e016322f0e7df668e57bf41562a6a41a",
+    "started_utc": "2026-10-16T19:38:28.234438+00:00"
+  },
+  "probe_sha256": "82257e9f214565a1c5085d26bd9a2ef4b98276c0cefd79a37d905e79f06133c0",
+  "settings": {
+    "device": "cpu",
+    "threads": 4,
+    "seed": 2026,
+    "timing_seed": 2027,
+    "warmup": 20,
+    "repeats": 100
+  },
+  "dtype": "float32",
+  "input_shape": [
+    1,
+    3,
+    224,
+    224
+  ],
+  "input_sha256": "70c2aad1221b9c761fa202c6862b23a51ec0d8c2c237bee202e09390cdba578d",
+  "weights": {
+    "identifier": "ResNet18_Weights.IMAGENET1K_V1",
+    "url": "https://download.pytorch.org/models/resnet18-f37072fd.pth",
+    "sha256": "f37072fd47e89c5e827621c5baffa7500819f7896bbacec160b1a16c560e07ec"
+  },
+  "conversions": {
+    "fraction_0.75": {
+      "layers": [
+        {
+          "name": "layer4.0.conv2",
+          "settings": {
+            "factorization": "Tucker",
+            "rank": 0.75,
+            "fixed_rank_modes": "spatial"
+          },
+          "actual_rank": [
+            390,
+            390,
+            3,
+            3
+          ],
+          "implementation": "factorized",
+          "factor_shapes": [
+            [
+              512,
+              390
+            ],
+            [
+              512,
+              390
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              3,
+              3
+            ]
+          ],
+          "core_shape": [
+            390,
+            390,
+            3,
+            3
+          ]
+        },
+        {
+          "name": "layer4.1.conv2",
+          "settings": {
+            "factorization": "Tucker",
+            "rank": 0.75,
+            "fixed_rank_modes": "spatial"
+          },
+          "actual_rank": [
+            390,
+            390,
+            3,
+            3
+          ],
+          "implementation": "factorized",
+          "factor_shapes": [
+            [
+              512,
+              390
+            ],
+            [
+              512,
+              390
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              3,
+              3
+            ]
+          ],
+          "core_shape": [
+            390,
+            390,
+            3,
+            3
+          ]
+        },
+        {
+          "name": "fc",
+          "settings": {
+            "factorization": "BlockTT",
+            "rank": 0.75,
+            "in_tensorized_features": [
+              8,
+              8,
+              8
+            ],
+            "out_tensorized_features": [
+              10,
+              10,
+              10
+            ]
+          },
+          "actual_rank": [
+            1,
+            68,
+            68,
+            1
+          ],
+          "implementation": "factorized",
+          "factor_shapes": [
+            [
+              1,
+              10,
+              8,
+              68
+            ],
+            [
+              68,
+              10,
+              8,
+              68
+            ],
+            [
+              68,
+              10,
+              8,
+              1
+            ]
+          ],
+          "core_shape": null
+        }
+      ],
+      "storage": {
+        "original": {
+          "parameter_count": 11689512,
+          "parameter_bytes": 46758048,
+          "buffer_bytes": 38560
+        },
+        "compressed": {
+          "parameter_count": 10376276,
+          "parameter_bytes": 41505104,
+          "buffer_bytes": 38560
+        }
+      }
+    },
+    "fraction_0.50": {
+      "layers": [
+        {
+          "name": "layer4.0.conv2",
+          "settings": {
+            "factorization": "Tucker",
+            "rank": 0.5,
+            "fixed_rank_modes": "spatial"
+          },
+          "actual_rank": [
+            310,
+            310,
+            3,
+            3
+          ],
+          "implementation": "factorized",
+          "factor_shapes": [
+            [
+              512,
+              310
+            ],
+            [
+              512,
+              310
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              3,
+              3
+            ]
+          ],
+          "core_shape": [
+            310,
+            310,
+            3,
+            3
+          ]
+        },
+        {
+          "name": "layer4.1.conv2",
+          "settings": {
+            "factorization": "Tucker",
+            "rank": 0.5,
+            "fixed_rank_modes": "spatial"
+          },
+          "actual_rank": [
+            310,
+            310,
+            3,
+            3
+          ],
+          "implementation": "factorized",
+          "factor_shapes": [
+            [
+              512,
+              310
+            ],
+            [
+              512,
+              310
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              3,
+              3
+            ]
+          ],
+          "core_shape": [
+            310,
+            310,
+            3,
+            3
+          ]
+        },
+        {
+          "name": "fc",
+          "settings": {
+            "factorization": "BlockTT",
+            "rank": 0.5,
+            "in_tensorized_features": [
+              8,
+              8,
+              8
+            ],
+            "out_tensorized_features": [
+              10,
+              10,
+              10
+            ]
+          },
+          "actual_rank": [
+            1,
+            56,
+            56,
+            1
+          ],
+          "implementation": "factorized",
+          "factor_shapes": [
+            [
+              1,
+              10,
+              8,
+              56
+            ],
+            [
+              56,
+              10,
+              8,
+              56
+            ],
+            [
+              56,
+              10,
+              8,
+              1
+            ]
+          ],
+          "core_shape": null
+        }
+      ],
+      "storage": {
+        "original": {
+          "parameter_count": 11689512,
+          "parameter_bytes": 46758048,
+          "buffer_bytes": 38560
+        },
+        "compressed": {
+          "parameter_count": 9083476,
+          "parameter_bytes": 36333904,
+          "buffer_bytes": 38560
+        }
+      }
+    }
+  },
+  "baseline_before_sha256": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e",
+  "order": [
+    "fraction_0.50",
+    "dense",
+    "fraction_0.75",
+    "dense"
+  ],
+  "blocks": [
+    {
+      "position": 1,
+      "variant": "fraction_0.50",
+      "dense_recheck": false,
+      "started_utc": "2026-10-16T19:38:36.405421+00:00",
+      "threads": 4,
+      "interop_threads": 1,
+      "backend": {
+        "deterministic_algorithms": true,
+        "matmul_precision": "highest",
+        "cuda_matmul_tf32": false,
+        "cudnn_tf32": false,
+        "cudnn_benchmark": false,
+        "cudnn_deterministic": true,
+        "mkldnn_enabled": true,
+        "cublas_workspace_config": ":4096:8",
+        "omp_num_threads": null,
+        "mkl_num_threads": null
+      },
+      "evaluation_mode": true,
+      "inference_mode": true,
+      "latency": {
+        "median_ms": 25.0445485,
+        "p25_ms": 24.926594249999997,
+        "p75_ms": 25.319802250000002,
+        "samples_ms": [
+          24.893302,
+          24.984178,
+          24.885788,
+          24.981011,
+          24.867575,
+          24.911233,
+          25.166523,
+          25.152979,
+          24.967364,
+          24.920379,
+          24.818651,
+          24.961564,
+          24.934992,
+          25.023432,
+          24.931463,
+          25.27189,
+          24.818276,
+          25.176331,
+          24.927152,
+          25.135981,
+          25.223142,
+          25.22173,
+          24.994554,
+          25.097741,
+          24.936281,
+          25.246462,
+          24.94056,
+          24.96419,
+          24.941696,
+          24.882092,
+          24.887093,
+          24.821445,
+          24.843402,
+          25.037977,
+          24.73672,
+          24.807461,
+          24.980037,
+          24.991176,
+          24.924168,
+          24.924921,
+          24.890132,
+          25.31642,
+          24.777943,
+          25.442398,
+          25.396431,
+          25.780163,
+          25.575915,
+          25.638542,
+          25.557106,
+          25.474261,
+          25.78796,
+          25.502624,
+          25.477252,
+          25.873944,
+          25.794833,
+          25.266888,
+          25.631604,
+          25.408667,
+          25.780671,
+          25.822222,
+          25.412863,
+          25.128575,
+          24.931586,
+          24.998645,
+          24.817611,
+          25.066671,
+          25.203024,
+          25.114748,
+          24.897734,
+          24.989205,
+          24.751502,
+          24.904882,
+          24.831334,
+          24.956755,
+          25.105601,
+          24.952931,
+          25.292538,
+          25.95141,
+          25.457317,
+          25.329949,
+          25.465562,
+          25.553151,
+          25.576717,
+          25.371309,
+          24.998583,
+          24.945498,
+          25.05112,
+          24.863906,
+          25.027488,
+          25.173198,
+          24.937281,
+          24.83501,
+          24.860026,
+          25.075304,
+          25.058197,
+          25.15826,
+          25.236173,
+          25.251835,
+          25.203901,
+          25.440221
+        ]
+      },
+      "completed_utc": "2026-10-16T19:38:39.438332+00:00",
+      "baseline_after_sha256": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e"
+    },
+    {
+      "position": 2,
+      "variant": "dense",
+      "dense_recheck": false,
+      "started_utc": "2026-10-16T19:38:39.486655+00:00",
+      "threads": 4,
+      "interop_threads": 1,
+      "backend": {
+        "deterministic_algorithms": true,
+        "matmul_precision": "highest",
+        "cuda_matmul_tf32": false,
+        "cudnn_tf32": false,
+        "cudnn_benchmark": false,
+        "cudnn_deterministic": true,
+        "mkldnn_enabled": true,
+        "cublas_workspace_config": ":4096:8",
+        "omp_num_threads": null,
+        "mkl_num_threads": null
+      },
+      "evaluation_mode": true,
+      "inference_mode": true,
+      "latency": {
+        "median_ms": 21.605750999999998,
+        "p25_ms": 21.487192250000003,
+        "p75_ms": 21.72652275,
+        "samples_ms": [
+          21.493715,
+          21.726368,
+          21.617699,
+          21.582563,
+          21.49207,
+          21.555877,
+          21.342526,
+          21.534553,
+          21.65392,
+          21.478882,
+          21.493658,
+          21.598303,
+          21.417492,
+          21.388235,
+          21.583044,
+          21.366747,
+          21.673006,
+          22.185122,
+          21.74706,
+          21.941473,
+          21.908899,
+          21.40901,
+          21.860799,
+          22.100248,
+          21.810554,
+          21.726987,
+          21.850826,
+          21.60979,
+          21.792072,
+          21.597888,
+          21.912648,
+          21.504484,
+          21.789407,
+          21.660115,
+          21.802557,
+          21.63192,
+          21.515838,
+          21.435272,
+          21.533313,
+          21.529979,
+          21.613202,
+          21.609248,
+          21.48798,
+          21.29207,
+          21.387713,
+          21.672419,
+          21.498793,
+          21.387185,
+          21.40514,
+          21.434848,
+          21.365822,
+          21.38035,
+          21.335478,
+          22.122217,
+          21.684661,
+          21.437987,
+          21.56895,
+          21.464222,
+          21.277709,
+          21.445288,
+          21.327398,
+          21.392769,
+          21.630638,
+          21.614789,
+          21.8253,
+          21.767576,
+          21.484829,
+          21.432798,
+          21.629332,
+          21.651418,
+          21.564328,
+          21.653764,
+          21.446958,
+          21.578913,
+          21.865592,
+          21.633782,
+          21.705941,
+          21.720332,
+          21.563055,
+          21.619695,
+          21.533383,
+          21.675256,
+          22.113129,
+          21.77544,
+          21.833325,
+          21.909562,
+          21.575184,
+          21.74733,
+          22.122103,
+          21.602254,
+          21.691159,
+          21.848554,
+          21.687413,
+          21.681105,
+          21.495635,
+          21.422349,
+          21.745495,
+          21.530692,
+          21.499995,
+          21.71997
+        ]
+      },
+      "completed_utc": "2026-10-16T19:38:42.088047+00:00",
+      "baseline_after_sha256": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e"
+    },
+    {
+      "position": 3,
+      "variant": "fraction_0.75",
+      "dense_recheck": false,
+      "started_utc": "2026-10-16T19:38:42.134552+00:00",
+      "threads": 4,
+      "interop_threads": 1,
+      "backend": {
+        "deterministic_algorithms": true,
+        "matmul_precision": "highest",
+        "cuda_matmul_tf32": false,
+        "cudnn_tf32": false,
+        "cudnn_benchmark": false,
+        "cudnn_deterministic": true,
+        "mkldnn_enabled": true,
+        "cublas_workspace_config": ":4096:8",
+        "omp_num_threads": null,
+        "mkl_num_threads": null
+      },
+      "evaluation_mode": true,
+      "inference_mode": true,
+      "latency": {
+        "median_ms": 27.3215155,
+        "p25_ms": 27.2024535,
+        "p75_ms": 27.435135000000002,
+        "samples_ms": [
+          27.314854,
+          27.23452,
+          27.239948,
+          27.387273,
+          27.245844,
+          27.260758,
+          27.271394,
+          27.154597,
+          27.254762,
+          27.457685,
+          27.333462,
+          27.331937,
+          27.199626,
+          27.321817,
+          27.378425,
+          27.579437,
+          27.280548,
+          27.52462,
+          27.162946,
+          27.407121,
+          27.422631,
+          27.138697,
+          27.413151,
+          27.416897,
+          27.163756,
+          27.396323,
+          27.371131,
+          27.713886,
+          27.440203,
+          27.141057,
+          27.410191,
+          27.099735,
+          27.204914,
+          27.132221,
+          27.23076,
+          33.964559,
+          27.266038,
+          27.295514,
+          27.193802,
+          27.181056,
+          27.321214,
+          27.184851,
+          27.567293,
+          27.231314,
+          27.368465,
+          27.530442,
+          27.578437,
+          27.111931,
+          27.054599,
+          27.188551,
+          27.203396,
+          27.330446,
+          27.277386,
+          27.221084,
+          27.260083,
+          27.126469,
+          27.380287,
+          27.453199,
+          27.417429,
+          27.666954,
+          27.402363,
+          27.681806,
+          27.439377,
+          28.059509,
+          27.825256,
+          27.831265,
+          27.667179,
+          27.528387,
+          27.43996,
+          27.318835,
+          27.5081,
+          27.638025,
+          27.520886,
+          27.424403,
+          27.365679,
+          27.059532,
+          27.164296,
+          27.184586,
+          27.091111,
+          27.193246,
+          27.299458,
+          27.218365,
+          27.416868,
+          27.243948,
+          27.192712,
+          27.328876,
+          27.212999,
+          27.125624,
+          27.378484,
+          27.344919,
+          27.365611,
+          27.317111,
+          27.181277,
+          27.198132,
+          27.436953,
+          27.571183,
+          27.434529,
+          27.176463,
+          27.238174,
+          27.49921
+        ]
+      },
+      "completed_utc": "2026-10-16T19:38:45.424096+00:00",
+      "baseline_after_sha256": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e"
+    },
+    {
+      "position": 4,
+      "variant": "dense",
+      "dense_recheck": true,
+      "started_utc": "2026-10-16T19:38:45.471388+00:00",
+      "threads": 4,
+      "interop_threads": 1,
+      "backend": {
+        "deterministic_algorithms": true,
+        "matmul_precision": "highest",
+        "cuda_matmul_tf32": false,
+        "cudnn_tf32": false,
+        "cudnn_benchmark": false,
+        "cudnn_deterministic": true,
+        "mkldnn_enabled": true,
+        "cublas_workspace_config": ":4096:8",
+        "omp_num_threads": null,
+        "mkl_num_threads": null
+      },
+      "evaluation_mode": true,
+      "inference_mode": true,
+      "latency": {
+        "median_ms": 21.4889675,
+        "p25_ms": 21.396544249999998,
+        "p75_ms": 21.5958725,
+        "samples_ms": [
+          21.456668,
+          21.467126,
+          21.2991,
+          21.613577,
+          21.467757,
+          21.358828,
+          21.39273,
+          21.500308,
+          21.69557,
+          21.691173,
+          21.480661,
+          21.348025,
+          21.286001,
+          21.437399,
+          21.470202,
+          21.450374,
+          21.358491,
+          21.375221,
+          21.219349,
+          21.297382,
+          21.400765,
+          21.450153,
+          21.337046,
+          21.751921,
+          21.60191,
+          21.498631,
+          21.506038,
+          21.422665,
+          21.419219,
+          21.914096,
+          21.417703,
+          21.522066,
+          21.538905,
+          21.292167,
+          21.411488,
+          21.48945,
+          21.641556,
+          21.49874,
+          21.892495,
+          21.910045,
+          22.06512,
+          21.562867,
+          21.531354,
+          21.528455,
+          21.358318,
+          21.27468,
+          21.540152,
+          21.205337,
+          21.2703,
+          21.45071,
+          21.328279,
+          21.589599,
+          21.516978,
+          21.409062,
+          21.606483,
+          21.775739,
+          21.488485,
+          21.523034,
+          21.372858,
+          21.654789,
+          21.561473,
+          21.370934,
+          21.497638,
+          21.479481,
+          21.487913,
+          21.459935,
+          21.394139,
+          21.321989,
+          21.520424,
+          21.528999,
+          21.663604,
+          21.593143,
+          21.448122,
+          21.478874,
+          21.33886,
+          21.492408,
+          21.549835,
+          21.49589,
+          21.397346,
+          21.615092,
+          21.418882,
+          21.545147,
+          28.305443,
+          21.390948,
+          21.380366,
+          21.488323,
+          21.398118,
+          21.786963,
+          21.800859,
+          21.884944,
+          21.657915,
+          22.113509,
+          21.673453,
+          21.368719,
+          21.638589,
+          21.623491,
+          21.605479,
+          21.513258,
+          21.337424,
+          21.59386
+        ]
+      },
+      "completed_utc": "2026-10-16T19:38:48.060073+00:00",
+      "baseline_after_sha256": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e"
+    }
+  ],
+  "baseline_after_sha256": "85740700d600dff61e3d0dfa0f53e6650d6541c96ec3c29b3e5ef1519c377b8e",
+  "completed_utc": "2026-10-16T19:38:48.116903+00:00"
+}

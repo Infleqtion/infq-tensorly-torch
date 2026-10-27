@@ -1,0 +1,19 @@
+{
+  "reason": "Reformat the existing CSV only; no measurements were repeated or rounded in JSON.",
+  "accuracy_percent_and_percentage_point_decimal_places": 2,
+  "latency_summary_decimal_places": 3,
+  "counts_and_byte_totals": "Exact integers, unchanged.",
+  "historical_file_sha256": {
+    "configuration.json": "13c61dbeeb65cc61c53ba4783ef97910dbb9eb5634314c4beb8ab47c345a69b1",
+    "measurements.json": "a778b3fd4c7dcd5d9b7ff385ae70cf7d45460a3b267ecc8a612c4d83f7c7b9e9",
+    "compression_reports.json": "758d1dbab10ee8b2c9682bec7f2fd2257fee1e92738bdd1c35ac30c80c1b4165",
+    "latency_samples.json": "a4123d1e3f1d559ef894ed22ef4977d992588c3f64197c14a44bc004e68ebb13",
+    "selected_examples.json": "c3c6dadb55007cf9258a1633a15537698a8005f244c1f96d83496bb023910a3a",
+    "validation_runs.json": "85398830f144278714a61ef0d79f253be3cf5fe66fd7ea755a947f6a18c4899f"
+  },
+  "previous_csv_sha256": "80fa1870bdb571251bb99a674aff0d3497b0134a062682f05813b1dfdd9d8f7a",
+  "formatted_csv_sha256": "f2d9cb1f9945f9742705f8eb12934668472bd07d19d8e00cca821d78a6143dc5",
+  "formatting_module_sha256": "f4067715e24e01ec991a56967b6dc545e016322f0e7df668e57bf41562a6a41a",
+  "original_execution_module_sha256": "77d6a2587cc5ed245254d54aa96de766347257cb96df9b1ea9555022fc8fec64",
+  "updated_utc": "2026-10-16T19:39:12.757024+00:00"
+}

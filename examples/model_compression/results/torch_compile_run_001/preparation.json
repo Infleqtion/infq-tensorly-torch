@@ -1,0 +1,126 @@
+{
+  "correctness_and_warmup": {
+    "dense": {
+      "compiler_before": {
+        "frames_started": 98,
+        "unique_graphs": 43,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 16,
+        "generated_kernels": 98,
+        "guard_failures": 10
+      },
+      "compiler_after": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_changes": {
+        "frames_started": 3,
+        "unique_graphs": 3,
+        "inductor_cache_misses": 3,
+        "generated_kernels": 15,
+        "guard_failures": 6
+      }
+    },
+    "fraction_0.75": {
+      "compiler_before": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_after": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_changes": {}
+    },
+    "fraction_0.50": {
+      "compiler_before": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_after": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_changes": {}
+    }
+  },
+  "repeated_calls": {
+    "dense": {
+      "compiler_before": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_after": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_changes": {}
+    },
+    "fraction_0.75": {
+      "compiler_before": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_after": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_changes": {}
+    },
+    "fraction_0.50": {
+      "compiler_before": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_after": {
+        "frames_started": 101,
+        "unique_graphs": 46,
+        "inductor_cache_hits": 0,
+        "inductor_cache_misses": 19,
+        "generated_kernels": 113,
+        "guard_failures": 16
+      },
+      "compiler_changes": {}
+    }
+  }
+}

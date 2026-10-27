@@ -294,9 +294,13 @@ class FactorizedConv(nn.Module):
         """
         padding = conv_layer.padding
         out_channels, in_channels, *kernel_size = conv_layer.weight.shape
-        stride = conv_layer.stride[0]
+        stride = conv_layer.stride
         bias = conv_layer.bias is not None
         dilation = conv_layer.dilation
+        if kwargs.get('device') is None:
+            kwargs['device'] = conv_layer.weight.device
+        if kwargs.get('dtype') is None:
+            kwargs['dtype'] = conv_layer.weight.dtype
 
         instance = cls(in_channels, out_channels, kernel_size, 
                        factorization=factorization, implementation=implementation, rank=rank, 
@@ -304,15 +308,21 @@ class FactorizedConv(nn.Module):
                        fixed_rank_modes=fixed_rank_modes, **kwargs)
 
         if decompose_weights:
-            if conv_layer.bias is not None:
-                instance.bias.data = conv_layer.bias.data
-        
             with torch.no_grad():
-                kernel_tensor = kernel_to_tensor(factorization, conv_layer.weight.data)
+                # Preserve explicit device/dtype overrides without exposing source storage.
+                source_weight = conv_layer.weight.detach().to(device=kwargs['device'], dtype=kwargs['dtype']).clone()
+                kernel_tensor = kernel_to_tensor(factorization, source_weight)
                 instance.weight.init_from_tensor(kernel_tensor, **decomposition_kwargs)
+                if bias:
+                    instance.bias.copy_(conv_layer.bias)
         else:
             instance.reset_parameters()
 
+        instance.rank = instance.weight.rank
+        instance.weight.requires_grad_(conv_layer.weight.requires_grad)
+        if bias:
+            instance.bias.requires_grad_(conv_layer.bias.requires_grad)
+        instance.train(conv_layer.training)
         return instance
 
     @classmethod

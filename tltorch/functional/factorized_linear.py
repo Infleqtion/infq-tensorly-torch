@@ -5,20 +5,29 @@ tl.set_backend('pytorch')
 # Author: Jean Kossaifi
 
 def linear_tucker(tensor, tucker_matrix, transpose=True, channels_first=True):
+    """Contract Tucker linear weights without forming an input/core outer product."""
+    output_shape, input_shape = tucker_matrix.tensorized_shape
+    output_modes = list(range(len(output_shape)))
+    input_modes = list(range(len(output_shape), len(output_shape) + len(input_shape)))
     if transpose:
-        contraction_axis = 1
+        contracted_modes, remaining_modes = input_modes, output_modes
     else:
-        contraction_axis = 0
-    n_rows = len(tucker_matrix.tensorized_shape[contraction_axis])
-    tensor = tensor.reshape(-1, *tucker_matrix.tensorized_shape[contraction_axis])
+        input_shape = output_shape
+        contracted_modes, remaining_modes = output_modes, input_modes
+    tensor = tensor.reshape(-1, *input_shape)
 
-    modes_tensor = list(range(tensor.ndim - n_rows, tensor.ndim))
-    if transpose:
-        modes_tucker = list(range(n_rows, tucker_matrix.order))
-    else:
-        modes_tucker = list(range(n_rows))
+    # Consume physical input modes before introducing any core output modes.
+    for tensor_mode, weight_mode in enumerate(contracted_modes, start=1):
+        factor = tucker_matrix.factors[weight_mode]
+        # Transpose explicitly: mode_dot(transpose=True) would conjugate complex factors.
+        tensor = tl.tenalg.mode_dot(tensor, tl.transpose(factor), tensor_mode)
 
-    return tensor_dot_tucker(tensor, tucker_matrix, (modes_tensor, modes_tucker))
+    tensor = tl.tenalg.tensordot(
+        tensor, tucker_matrix.core,
+        modes=(list(range(1, tensor.ndim)), contracted_modes))
+    for tensor_mode, weight_mode in enumerate(remaining_modes, start=1):
+        tensor = tl.tenalg.mode_dot(tensor, tucker_matrix.factors[weight_mode], tensor_mode)
+    return tensor
 
 def linear_cp(tensor, cp_matrix, transpose=True):
     if transpose:

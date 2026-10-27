@@ -134,7 +134,7 @@ class FactorizedLinear(nn.Module):
     @classmethod
     def from_linear(cls, linear, rank='same', auto_tensorize=True, n_tensorized_modes=3,
                     in_tensorized_features=None, out_tensorized_features=None, 
-                    bias=True, factorization='CP', implementation="reconstructed", 
+                    bias=None, factorization='CP', implementation="reconstructed",
                     checkpointing=False, decomposition_kwargs=dict(), verbose=False):
         """Class method to create an instance from an existing linear layer
         
@@ -157,7 +157,9 @@ class FactorizedLinear(nn.Module):
         rank :  {rank of the decomposition, 'same', float}
             if float, percentage of parameters of the original factorized_weights to use
             if 'same' use the same number of parameters
-        bias : bool, default is True
+        bias : bool or None, default is None
+            If None, preserve the source layer's bias presence. True or False
+            explicitly adds or removes the bias, respectively.
         verbose : bool, default is False
         """
         out_features, in_features = linear.weight.shape
@@ -175,15 +177,23 @@ class FactorizedLinear(nn.Module):
             assert(out_features == np.prod(out_tensorized_features))
             assert(in_features == np.prod(in_tensorized_features))
 
+        if bias is None:
+            bias = linear.bias is not None
         instance = cls(in_tensorized_features, out_tensorized_features, bias=bias,
-                       factorization=factorization, rank=rank, implementation=implementation, 
+                       factorization=factorization, rank=rank, implementation=implementation,
                        n_layers=1, checkpointing=checkpointing, device=linear.weight.device, dtype=linear.weight.dtype)
 
-        instance.weight.init_from_matrix(linear.weight.data, **decomposition_kwargs)
+        with torch.no_grad():
+            # Decomposition may modify its input or return a view of it.
+            instance.weight.init_from_matrix(linear.weight.detach().clone(), **decomposition_kwargs)
+            if bias and linear.bias is not None:
+                instance.bias.copy_(linear.bias)
 
+        instance.rank = instance.weight.rank
+        instance.weight.requires_grad_(linear.weight.requires_grad)
         if bias and linear.bias is not None:
-            instance.bias.data = linear.bias.data
-
+            instance.bias.requires_grad_(linear.bias.requires_grad)
+        instance.train(linear.training)
         return instance
 
     @classmethod
